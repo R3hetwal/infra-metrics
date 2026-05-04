@@ -7,6 +7,7 @@ Usage:
 """
 
 from dataclasses import dataclass, field
+from typing import Dict, Optional
 
 
 @dataclass
@@ -14,9 +15,9 @@ class _Config:
     service: str = "unknown"
     env: str = "dev"
     # Extra static labels added to every metric (e.g. region, pod)
-    extra_labels: dict = field(default_factory=dict)
+    extra_labels: Dict = field(default_factory=dict)
     # GPU device index to monitor (None = skip GPU even if pynvml present)
-    gpu_device_index: int | None = 0
+    gpu_device_index: Optional[int] = 0
 
 
 _config = _Config()
@@ -25,8 +26,8 @@ _config = _Config()
 def configure(
     service: str,
     env: str = "dev",
-    extra_labels: dict | None = None,
-    gpu_device_index: int | None = 0,
+    extra_labels: Optional[Dict] = None,
+    gpu_device_index: Optional[int] = 0,
 ) -> None:
     """
     Call once at application startup.

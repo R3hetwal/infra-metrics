@@ -22,7 +22,7 @@ from __future__ import annotations
 import inspect
 import time
 from functools import wraps
-from typing import Callable
+from typing import Callable, Optional
 
 from .config import get_config
 from ._gpu import NVML_AVAILABLE, gpu_before, gpu_after
@@ -31,9 +31,9 @@ from ._system import record_system_metrics
 
 
 def track(
-    endpoint: str | None = None,
+    endpoint: Optional[str] = None,
     *,
-    gpu: bool | None = None,
+    gpu: Optional[bool] = None,
     system: bool = True,
 ) -> Callable:
     """
