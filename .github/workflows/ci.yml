@@ -1,0 +1,57 @@
+name: CI & Publish
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]          # publish only on version tags e.g. v0.2.0
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Run tests on every push / PR ──────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Test
+        run: pytest tests/ -v
+
+  # ── Build + publish to PyPI only on version tag ───────────────────────────
+  publish:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi                 # requires PyPI token in repo secrets
+    permissions:
+      id-token: write                 # needed for trusted publishing (no token needed)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          pip install build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # Uses OIDC trusted publishing — no API token needed if configured on PyPI.
+        # Fallback: add PYPI_API_TOKEN to repo secrets and uncomment below:
+        # with:
+        #   password: ${{ secrets.PYPI_API_TOKEN }}

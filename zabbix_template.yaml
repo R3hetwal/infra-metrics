@@ -1,0 +1,303 @@
+zabbix_export:
+  version: "6.4"
+  template_groups:
+    - uuid: 7df96b18c230490a9a0a9e2307226338
+      name: AI Infrastructure
+
+  templates:
+    - uuid: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+      template: "infra-metrics AI Service"
+      name: "infra-metrics AI Service"
+      description: |
+        Monitors Python AI services instrumented with infra-metrics.
+        Polls the Prometheus /metrics endpoint.
+        Tracks: active agents, CPU, RAM, GPU util, GPU VRAM, request rate, errors, latency.
+      groups:
+        - name: AI Infrastructure
+
+      macros:
+        - macro: "{$METRICS_PORT}"
+          value: "8000"
+          description: "Port where /metrics is exposed"
+        - macro: "{$SERVICE_NAME}"
+          value: "my-service"
+          description: "Must match configure(service=...) in your code"
+        - macro: "{$ENDPOINT}"
+          value: "predict"
+          description: "Endpoint label to monitor (function name)"
+        - macro: "{$ACTIVE_AGENTS_WARN}"
+          value: "20"
+          description: "Warn threshold: concurrent agents"
+        - macro: "{$ACTIVE_AGENTS_HIGH}"
+          value: "50"
+          description: "High threshold: concurrent agents"
+        - macro: "{$CPU_WARN}"
+          value: "80"
+          description: "Warn threshold: CPU %"
+        - macro: "{$GPU_UTIL_WARN}"
+          value: "90"
+          description: "Warn threshold: GPU utilisation %"
+        - macro: "{$GPU_MEM_WARN_MB}"
+          value: "20000"
+          description: "Warn threshold: GPU VRAM used (MB)"
+        - macro: "{$ERROR_RATE_WARN}"
+          value: "5"
+          description: "Warn threshold: errors per minute"
+
+      items:
+        # ── Active agents ──────────────────────────────────────────────────
+        - uuid: 11111111111111111111111111111101
+          name: "Active agents [{$SERVICE_NAME}/{$ENDPOINT}]"
+          key: "infra.active_agents[{$SERVICE_NAME},{$ENDPOINT}]"
+          type: HTTP_AGENT                  # Zabbix polls /metrics itself
+          url: "http://{HOST.CONN}:{$METRICS_PORT}/metrics"
+          request_method: GET
+          retrieve_mode: BODY
+          value_type: FLOAT
+          units: "agents"
+          history: 30d
+          trends: 90d
+          preprocessing:
+            - type: REGEX
+              # Extracts value from:
+              # active_agents_total{service="my-service",endpoint="predict"} 7
+              parameters:
+                - 'active_agents_total\{[^}]*service="{$SERVICE_NAME}"[^}]*endpoint="{$ENDPOINT}"[^}]*\}\s+(\S+)'
+                - \1
+          tags:
+            - tag: component
+              value: agents
+
+        # ── CPU ────────────────────────────────────────────────────────────
+        - uuid: 11111111111111111111111111111102
+          name: "CPU usage [{$SERVICE_NAME}/{$ENDPOINT}]"
+          key: "infra.cpu[{$SERVICE_NAME},{$ENDPOINT}]"
+          type: HTTP_AGENT
+          url: "http://{HOST.CONN}:{$METRICS_PORT}/metrics"
+          request_method: GET
+          retrieve_mode: BODY
+          value_type: FLOAT
+          units: "%"
+          history: 30d
+          trends: 90d
+          preprocessing:
+            - type: REGEX
+              parameters:
+                - 'cpu_usage_percent\{[^}]*service="{$SERVICE_NAME}"[^}]*endpoint="{$ENDPOINT}"[^}]*\}\s+(\S+)'
+                - \1
+          tags:
+            - tag: component
+              value: system
+
+        # ── RAM ────────────────────────────────────────────────────────────
+        - uuid: 11111111111111111111111111111103
+          name: "RAM usage [{$SERVICE_NAME}/{$ENDPOINT}]"
+          key: "infra.ram[{$SERVICE_NAME},{$ENDPOINT}]"
+          type: HTTP_AGENT
+          url: "http://{HOST.CONN}:{$METRICS_PORT}/metrics"
+          request_method: GET
+          retrieve_mode: BODY
+          value_type: FLOAT
+          units: "MB"
+          history: 30d
+          trends: 90d
+          preprocessing:
+            - type: REGEX
+              parameters:
+                - 'ram_usage_mb\{[^}]*service="{$SERVICE_NAME}"[^}]*endpoint="{$ENDPOINT}"[^}]*\}\s+(\S+)'
+                - \1
+          tags:
+            - tag: component
+              value: system
+
+        # ── GPU utilisation ────────────────────────────────────────────────
+        - uuid: 11111111111111111111111111111104
+          name: "GPU utilisation after [{$SERVICE_NAME}/{$ENDPOINT}]"
+          key: "infra.gpu_util[{$SERVICE_NAME},{$ENDPOINT}]"
+          type: HTTP_AGENT
+          url: "http://{HOST.CONN}:{$METRICS_PORT}/metrics"
+          request_method: GET
+          retrieve_mode: BODY
+          value_type: FLOAT
+          units: "%"
+          history: 30d
+          trends: 90d
+          preprocessing:
+            - type: REGEX
+              parameters:
+                - 'gpu_utilization_percent\{[^}]*service="{$SERVICE_NAME}"[^}]*endpoint="{$ENDPOINT}"[^}]*stage="after"[^}]*\}\s+(\S+)'
+                - \1
+          tags:
+            - tag: component
+              value: gpu
+
+        # ── GPU VRAM used ──────────────────────────────────────────────────
+        - uuid: 11111111111111111111111111111105
+          name: "GPU VRAM used after [{$SERVICE_NAME}/{$ENDPOINT}]"
+          key: "infra.gpu_mem[{$SERVICE_NAME},{$ENDPOINT}]"
+          type: HTTP_AGENT
+          url: "http://{HOST.CONN}:{$METRICS_PORT}/metrics"
+          request_method: GET
+          retrieve_mode: BODY
+          value_type: FLOAT
+          units: "MB"
+          history: 30d
+          trends: 90d
+          preprocessing:
+            - type: REGEX
+              parameters:
+                - 'gpu_memory_used_mb\{[^}]*service="{$SERVICE_NAME}"[^}]*endpoint="{$ENDPOINT}"[^}]*stage="after"[^}]*\}\s+(\S+)'
+                - \1
+          tags:
+            - tag: component
+              value: gpu
+
+        # ── GPU VRAM delta per request ─────────────────────────────────────
+        - uuid: 11111111111111111111111111111106
+          name: "GPU VRAM delta [{$SERVICE_NAME}/{$ENDPOINT}]"
+          key: "infra.gpu_delta[{$SERVICE_NAME},{$ENDPOINT}]"
+          type: HTTP_AGENT
+          url: "http://{HOST.CONN}:{$METRICS_PORT}/metrics"
+          request_method: GET
+          retrieve_mode: BODY
+          value_type: FLOAT
+          units: "MB"
+          history: 30d
+          trends: 90d
+          preprocessing:
+            - type: REGEX
+              parameters:
+                - 'gpu_memory_delta_mb\{[^}]*service="{$SERVICE_NAME}"[^}]*endpoint="{$ENDPOINT}"[^}]*\}\s+(\S+)'
+                - \1
+          tags:
+            - tag: component
+              value: gpu
+
+        # ── Request rate (derived: increase over 1m) ───────────────────────
+        - uuid: 11111111111111111111111111111107
+          name: "Request rate [{$SERVICE_NAME}/{$ENDPOINT}]"
+          key: "infra.request_rate[{$SERVICE_NAME},{$ENDPOINT}]"
+          type: HTTP_AGENT
+          url: "http://{HOST.CONN}:{$METRICS_PORT}/metrics"
+          request_method: GET
+          retrieve_mode: BODY
+          value_type: FLOAT
+          units: "req/s"
+          history: 30d
+          trends: 90d
+          preprocessing:
+            - type: REGEX
+              parameters:
+                - 'service_requests_total\{[^}]*service="{$SERVICE_NAME}"[^}]*endpoint="{$ENDPOINT}"[^}]*status="ok"[^}]*\}\s+(\S+)'
+                - \1
+            - type: CHANGE_PER_SECOND  # Zabbix converts cumulative counter → rate
+          tags:
+            - tag: component
+              value: requests
+
+        # ── Error rate ─────────────────────────────────────────────────────
+        - uuid: 11111111111111111111111111111108
+          name: "Error rate [{$SERVICE_NAME}/{$ENDPOINT}]"
+          key: "infra.error_rate[{$SERVICE_NAME},{$ENDPOINT}]"
+          type: HTTP_AGENT
+          url: "http://{HOST.CONN}:{$METRICS_PORT}/metrics"
+          request_method: GET
+          retrieve_mode: BODY
+          value_type: FLOAT
+          units: "err/s"
+          history: 30d
+          trends: 90d
+          preprocessing:
+            - type: REGEX
+              parameters:
+                - 'service_errors_total\{[^}]*service="{$SERVICE_NAME}"[^}]*endpoint="{$ENDPOINT}"[^}]*\}\s+(\S+)'
+                - \1
+            - type: CHANGE_PER_SECOND
+          tags:
+            - tag: component
+              value: requests
+
+      # ── Triggers ──────────────────────────────────────────────────────────
+      triggers:
+        - uuid: 22222222222222222222222222222201
+          name: "High concurrent agents on {HOST.NAME} [{$SERVICE_NAME}]"
+          expression: "last(/infra-metrics AI Service/infra.active_agents[{$SERVICE_NAME},{$ENDPOINT}])>{$ACTIVE_AGENTS_HIGH}"
+          severity: HIGH
+          description: "More than {$ACTIVE_AGENTS_HIGH} agents running simultaneously. Service may be overloaded."
+
+        - uuid: 22222222222222222222222222222202
+          name: "Elevated concurrent agents on {HOST.NAME} [{$SERVICE_NAME}]"
+          expression: "last(/infra-metrics AI Service/infra.active_agents[{$SERVICE_NAME},{$ENDPOINT}])>{$ACTIVE_AGENTS_WARN}"
+          severity: WARNING
+          description: "Active agents above warning threshold {$ACTIVE_AGENTS_WARN}."
+          dependencies:
+            - name: "High concurrent agents on {HOST.NAME} [{$SERVICE_NAME}]"
+              expression: "last(/infra-metrics AI Service/infra.active_agents[{$SERVICE_NAME},{$ENDPOINT}])>{$ACTIVE_AGENTS_HIGH}"
+
+        - uuid: 22222222222222222222222222222203
+          name: "High CPU on {HOST.NAME} [{$SERVICE_NAME}]"
+          expression: "avg(/infra-metrics AI Service/infra.cpu[{$SERVICE_NAME},{$ENDPOINT}],5m)>{$CPU_WARN}"
+          severity: WARNING
+          description: "CPU above {$CPU_WARN}% for 5 minutes."
+
+        - uuid: 22222222222222222222222222222204
+          name: "High GPU utilisation on {HOST.NAME} [{$SERVICE_NAME}]"
+          expression: "avg(/infra-metrics AI Service/infra.gpu_util[{$SERVICE_NAME},{$ENDPOINT}],5m)>{$GPU_UTIL_WARN}"
+          severity: WARNING
+          description: "GPU utilisation above {$GPU_UTIL_WARN}% for 5 minutes."
+
+        - uuid: 22222222222222222222222222222205
+          name: "High GPU VRAM on {HOST.NAME} [{$SERVICE_NAME}]"
+          expression: "last(/infra-metrics AI Service/infra.gpu_mem[{$SERVICE_NAME},{$ENDPOINT}])>{$GPU_MEM_WARN_MB}"
+          severity: HIGH
+          description: "GPU VRAM used above {$GPU_MEM_WARN_MB} MB. Risk of OOM."
+
+        - uuid: 22222222222222222222222222222206
+          name: "Errors spiking on {HOST.NAME} [{$SERVICE_NAME}]"
+          expression: "avg(/infra-metrics AI Service/infra.error_rate[{$SERVICE_NAME},{$ENDPOINT}],3m)>{$ERROR_RATE_WARN}/60"
+          severity: HIGH
+          description: "Error rate above {$ERROR_RATE_WARN} errors/min for 3 minutes."
+
+        - uuid: 22222222222222222222222222222207
+          name: "Metrics endpoint down on {HOST.NAME}"
+          expression: "nodata(/infra-metrics AI Service/infra.active_agents[{$SERVICE_NAME},{$ENDPOINT}],5m)=1"
+          severity: DISASTER
+          description: "/metrics not reachable for 5 minutes. Service may be down."
+
+      # ── Graphs ────────────────────────────────────────────────────────────
+      graphs:
+        - uuid: 33333333333333333333333333333301
+          name: "Active Agents & Request Rate"
+          graph_items:
+            - color: "1A7C11"
+              item:
+                host: "infra-metrics AI Service"
+                key: "infra.active_agents[{$SERVICE_NAME},{$ENDPOINT}]"
+            - color: "2774A4"
+              item:
+                host: "infra-metrics AI Service"
+                key: "infra.request_rate[{$SERVICE_NAME},{$ENDPOINT}]"
+
+        - uuid: 33333333333333333333333333333302
+          name: "GPU Utilisation & VRAM"
+          graph_items:
+            - color: "F63100"
+              item:
+                host: "infra-metrics AI Service"
+                key: "infra.gpu_util[{$SERVICE_NAME},{$ENDPOINT}]"
+            - color: "FC6EA3"
+              item:
+                host: "infra-metrics AI Service"
+                key: "infra.gpu_mem[{$SERVICE_NAME},{$ENDPOINT}]"
+
+        - uuid: 33333333333333333333333333333303
+          name: "CPU & RAM"
+          graph_items:
+            - color: "F7941D"
+              item:
+                host: "infra-metrics AI Service"
+                key: "infra.cpu[{$SERVICE_NAME},{$ENDPOINT}]"
+            - color: "A54F10"
+              item:
+                host: "infra-metrics AI Service"
+                key: "infra.ram[{$SERVICE_NAME},{$ENDPOINT}]"

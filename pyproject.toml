@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "infra-metrics"
+version = "0.1.0"
+description = "Unified Prometheus observability for CPU, RAM, GPU, and request latency"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+dependencies = [
+    "prometheus-client>=0.20.0",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+# Use nvidia-ml-py (official NVIDIA package) — NOT the 'pynvml' PyPI package.
+# Both expose the same `pynvml` module. PyTorch already installs nvidia-ml-py
+# as a transitive dep, so this avoids a module-name collision.
+gpu = ["nvidia-ml-py>=12.0.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.urls]
+Repository = "https://github.com/your-org/infra-metrics"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["infra_metrics*"]
