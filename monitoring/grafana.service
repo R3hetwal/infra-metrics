@@ -1,0 +1,14 @@
+[Unit]
+Description=Grafana
+After=network.target prometheus.service
+
+[Service]
+Type=simple
+User=grafana
+ExecStart=/usr/sbin/grafana-server \
+  --config=/etc/grafana/grafana.ini \
+  --homepath=/usr/share/grafana
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

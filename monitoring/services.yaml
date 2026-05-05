@@ -1,0 +1,37 @@
+# Edit this file per server, then run:
+#   python3 generate_prometheus_config.py
+#
+# host = IP or hostname where that service runs
+# port = port the service listens on (metrics at <host>:<port>/metrics)
+
+scrape_interval: 15s
+
+services:
+  - name: stt
+    host: localhost
+    port: 8001
+
+  - name: tts
+    host: localhost
+    port: 8002
+
+  - name: ner
+    host: localhost
+    port: 8003
+
+  - name: sentiment
+    host: localhost
+    port: 8004
+
+  - name: other-service
+    host: localhost
+    port: 8005
+
+# Cross-server example (uncomment and edit):
+# - name: stt
+#   host: 192.168.1.20
+#   port: 8001
+#
+# - name: tts
+#   host: 192.168.1.21    # different machine
+#   port: 9000            # different port

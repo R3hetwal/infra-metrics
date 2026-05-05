@@ -1,0 +1,224 @@
+{
+  "title": "AI Services — infra-metrics",
+  "uid": "infra-metrics-main",
+  "timezone": "browser",
+  "refresh": "15s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+
+    {
+      "id": 1,
+      "title": "Active Agents (all services)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 15 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "active_agents_total",
+          "legendFormat": "{{service}} / {{endpoint}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+
+    {
+      "id": 2,
+      "title": "Request Rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(service_requests_total{status=\"ok\"}[1m])",
+          "legendFormat": "{{service}} / {{endpoint}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+
+    {
+      "id": 3,
+      "title": "Request Latency p95 (seconds)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(service_request_latency_seconds_bucket[2m]))",
+          "legendFormat": "p95 {{service}} / {{endpoint}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+
+    {
+      "id": 4,
+      "title": "Error Rate (err/s)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": { "fixedColor": "red", "mode": "fixed" },
+          "custom": { "lineWidth": 2, "fillOpacity": 20 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(service_errors_total[1m])",
+          "legendFormat": "{{service}} / {{endpoint}} / {{exception_type}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+
+    {
+      "id": 5,
+      "title": "CPU Usage (%)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 16, "w": 8, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "cpu_usage_percent",
+          "legendFormat": "{{service}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+
+    {
+      "id": 6,
+      "title": "RAM Usage (MB)",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 16, "w": 8, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "megabytes",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "ram_usage_mb",
+          "legendFormat": "{{service}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+
+    {
+      "id": 7,
+      "title": "GPU Utilisation (%)",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 16, "w": 8, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0, "max": 100,
+          "color": { "fixedColor": "orange", "mode": "fixed" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "gpu_utilization_percent{stage=\"after\"}",
+          "legendFormat": "{{service}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+
+    {
+      "id": 8,
+      "title": "GPU VRAM Used (MB)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "megabytes",
+          "color": { "fixedColor": "red", "mode": "fixed" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "gpu_memory_used_mb{stage=\"after\"}",
+          "legendFormat": "{{service}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+
+    {
+      "id": 9,
+      "title": "GPU VRAM Delta per Request (MB)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "megabytes",
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "gpu_memory_delta_mb",
+          "legendFormat": "{{service}} / {{endpoint}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    },
+
+    {
+      "id": 10,
+      "title": "Current Active Agents — Live",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 32, "w": 24, "h": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 20 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "horizontal", "colorMode": "background" },
+      "targets": [
+        {
+          "expr": "active_agents_total",
+          "legendFormat": "{{service}} / {{endpoint}}",
+          "datasource": "Prometheus"
+        }
+      ]
+    }
+
+  ]
+}
