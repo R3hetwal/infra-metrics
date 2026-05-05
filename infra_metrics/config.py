@@ -8,19 +8,22 @@ Usage:
 
 from dataclasses import dataclass, field
 from typing import Dict, Optional
+import os
 
 
 @dataclass
 class _Config:
     service: str = "unknown"
     env: str = "dev"
-    # Extra static labels added to every metric (e.g. region, pod)
     extra_labels: Dict = field(default_factory=dict)
-    # GPU device index to monitor (None = skip GPU even if pynvml present)
     gpu_device_index: Optional[int] = 0
 
 
-_config = _Config()
+# Auto-populate from env vars if present
+_config = _Config(
+    service=os.getenv("INFRA_METRICS_SERVICE", "unknown"),
+    env=os.getenv("INFRA_METRICS_ENV", "dev"),
+)
 
 
 def configure(
