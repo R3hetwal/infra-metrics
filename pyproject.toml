@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "infra-metrics"
-version = "0.1.0"
+version = "0.2.0"
 description = "Unified Prometheus observability for CPU, RAM, GPU, and request latency"
 readme = "README.md"
 requires-python = ">=3.9"
