@@ -13,10 +13,35 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
 
+from ._system import record_service_baseline
+from .config import get_config
+
 logger = logging.getLogger(__name__)
+
+
+def _start_background_metrics(service: str, interval: float = 10.0) -> None:
+    """
+    Background daemon thread — records RAM/CPU/power every `interval` seconds.
+
+    Fixes "0 MB RAM" for services that have received no requests yet:
+    the service-level gauges (ram_usage_mb_service, cpu_usage_percent_service,
+    cpu_power_watts) are populated from the first loop iteration, not on first request.
+    """
+    def _loop() -> None:
+        while True:
+            try:
+                record_service_baseline(service)
+            except Exception:
+                pass
+            time.sleep(interval)
+
+    t = threading.Thread(target=_loop, daemon=True, name="infra-metrics-bg")
+    t.start()
+    logger.debug("Background metrics thread started (service=%s, interval=%ss)", service, interval)
 
 
 # ── Universal mount — auto-detects FastAPI or Flask ──────────────────────────
@@ -53,6 +78,7 @@ def mount_metrics(app, path: str = "/metrics") -> None:
             f"mount_metrics() does not recognise app type {type(app)}. "
             "Use mount_metrics_fastapi() or mount_metrics_flask() directly."
         )
+    _start_background_metrics(get_config().service)
 
 
 # ── FastAPI / Starlette ───────────────────────────────────────────────────────
@@ -109,3 +135,4 @@ def start_metrics_server(port: int = 9100, addr: str = "0.0.0.0") -> None:
 
     t = threading.Thread(target=_serve, daemon=True, name="prometheus-metrics")
     t.start()
+    _start_background_metrics(get_config().service)

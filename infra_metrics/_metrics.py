@@ -10,6 +10,12 @@ ACTIVE_AGENTS = Gauge(
     ["service", "endpoint"],
 )
 
+PEAK_ACTIVE_AGENTS = Gauge(
+    "peak_active_agents_total",
+    "High-water mark of concurrent agents since process start",
+    ["service", "endpoint"],
+)
+
 REQUEST_COUNT = Counter(
     "service_requests_total",
     "Total requests",

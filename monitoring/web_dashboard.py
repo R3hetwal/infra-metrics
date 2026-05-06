@@ -140,15 +140,19 @@ def collect_all() -> list:
         lat_c = sv("service_request_latency_seconds_count", service=name) or 1
 
         snap = {
-            "agents":     int(sv("active_agents_total",       service=name)),
-            "requests":   int(sv("service_requests_total",    service=name)),
-            "errors":     int(sv("service_errors_total",      service=name)),
-            "latency_ms": round((lat_s / lat_c) * 1000, 1),
-            "cpu":        round(sv("cpu_usage_percent",        service=name), 1),
-            "ram_mb":     round(sv("ram_usage_mb",             service=name), 0),
-            "gpu_util":   round(gv("gpu_utilization_percent",  service=name, stage="after"), 1),
-            "vram_mb":    round(gv("gpu_memory_used_mb",       service=name, stage="after"), 0),
-            "vram_delta": round(sv("gpu_memory_delta_mb",      service=name), 1),
+            "agents":      int(sv("active_agents_total",       service=name)),
+            "peak_agents": int(sv("peak_active_agents_total",  service=name)),
+            "requests":    int(sv("service_requests_total",    service=name)),
+            "errors":      int(sv("service_errors_total",      service=name)),
+            "latency_ms":  round((lat_s / lat_c) * 1000, 1),
+            # Use service-level gauges (populated by background thread even at 0 requests)
+            "cpu":         round(gv("cpu_usage_percent_service",  service=name), 1),
+            "ram_mb":      round(gv("ram_usage_mb_service",       service=name), 0),
+            "cpu_watts":   round(gv("cpu_power_watts",            service=name), 1),
+            "gpu_util":    round(gv("gpu_utilization_percent",    service=name, stage="after"), 1),
+            "vram_mb":     round(gv("gpu_memory_used_mb",         service=name, stage="after"), 0),
+            "vram_delta":  round(sv("gpu_memory_delta_mb",        service=name), 1),
+            "gpu_watts":   round(gv("gpu_power_watts",            service=name), 1),
         }
 
         was_up = last_up.get(name, True)
@@ -367,6 +371,22 @@ tr:hover td{background:var(--sf2)}
       </div>
       <div class="am-chart-wrap"><canvas id="uc-vram"></canvas></div>
     </div>
+    <div class="am-card">
+      <div class="am-header">
+        <span class="am-title">CPU Power</span>
+        <span class="am-cur" id="am-cur-cpuw">—</span>
+        <div class="am-legend" id="am-leg-cpuw"></div>
+      </div>
+      <div class="am-chart-wrap"><canvas id="uc-cpuw"></canvas></div>
+    </div>
+    <div class="am-card">
+      <div class="am-header">
+        <span class="am-title">GPU Power</span>
+        <span class="am-cur" id="am-cur-gpuw">—</span>
+        <div class="am-legend" id="am-leg-gpuw"></div>
+      </div>
+      <div class="am-chart-wrap"><canvas id="uc-gpuw"></canvas></div>
+    </div>
   </div>
 </div>
 
@@ -422,13 +442,15 @@ function renderCard(s) {
   } else {
     body=`
     <div class="cm">
-      <div class="mt"><span class="ml">Agents</span><span class="mv ${vc(s.agents,10,30)}">${s.agents}</span></div>
+      <div class="mt"><span class="ml">Agents</span><span class="mv ${vc(s.agents,10,30)}">${s.agents}</span><span style="font-size:9px;color:var(--mu)"> peak&nbsp;${s.peak_agents}</span></div>
       <div class="mt"><span class="ml">Requests</span><span class="mv">${s.requests.toLocaleString()}</span></div>
       <div class="mt"><span class="ml">Latency</span><span class="mv ${vc(s.latency_ms,300,1000)}">${s.latency_ms}ms</span></div>
       <div class="mt"><span class="ml">CPU</span><span class="mv ${vc(s.cpu,60,85)}">${s.cpu}%</span>${mbar(s.cpu)}</div>
+      <div class="mt"><span class="ml">CPU Power</span><span class="mv">${s.cpu_watts>0?s.cpu_watts.toFixed(1)+' W':'—'}</span></div>
       <div class="mt"><span class="ml">Sys RAM</span><span class="mv">${mb(s.ram_mb)}</span></div>
       <div class="mt"><span class="ml">Errors</span><span class="mv ${s.errors>0?'cr':''}">${s.errors}</span></div>
       <div class="mt"><span class="ml">GPU</span><span class="mv ${vc(s.gpu_util,60,85)}">${s.gpu_util>0?s.gpu_util+'%':'—'}</span>${s.gpu_util>0?mbar(s.gpu_util):''}</div>
+      <div class="mt"><span class="ml">GPU Power</span><span class="mv">${s.gpu_watts>0?s.gpu_watts.toFixed(0)+' W':'—'}</span></div>
       <div class="mt"><span class="ml">VRAM</span><span class="mv">${s.vram_mb>0?mb(s.vram_mb):'—'}</span></div>
       <div class="mt"><span class="ml">VRAM Δ</span><span class="mv ${s.vram_delta>500?'wn':''}">${s.vram_delta>0?mb(s.vram_delta):'—'}</span></div>
     </div>`;
@@ -521,13 +543,17 @@ const amYMax    = {};   // stable Y ceiling — only grows
 
 const AM_DEFS = [
   { canvasId:'uc-cpu',  legId:'am-leg-cpu',  curId:'am-cur-cpu',
-    key:'cpu',      title:'CPU Usage',       unit:'%',  fixedMax:100,  floor:100 },
+    key:'cpu',       title:'CPU Usage',       unit:'%',  fixedMax:100,  floor:100 },
   { canvasId:'uc-ram',  legId:'am-leg-ram',  curId:'am-cur-ram',
-    key:'ram_mb',   title:'System RAM',      unit:' MB',fixedMax:null, floor:512 },
+    key:'ram_mb',    title:'System RAM',      unit:' MB',fixedMax:null, floor:512 },
   { canvasId:'uc-gpu',  legId:'am-leg-gpu',  curId:'am-cur-gpu',
-    key:'gpu_util', title:'GPU Utilisation', unit:'%',  fixedMax:100,  floor:100 },
+    key:'gpu_util',  title:'GPU Utilisation', unit:'%',  fixedMax:100,  floor:100 },
   { canvasId:'uc-vram', legId:'am-leg-vram', curId:'am-cur-vram',
-    key:'vram_mb',  title:'VRAM Used',       unit:' MB',fixedMax:null, floor:512 },
+    key:'vram_mb',   title:'VRAM Used',       unit:' MB',fixedMax:null, floor:512 },
+  { canvasId:'uc-cpuw', legId:'am-leg-cpuw', curId:'am-cur-cpuw',
+    key:'cpu_watts', title:'CPU Power',       unit:' W', fixedMax:null, floor:50  },
+  { canvasId:'uc-gpuw', legId:'am-leg-gpuw', curId:'am-cur-gpuw',
+    key:'gpu_watts', title:'GPU Power',       unit:' W', fixedMax:null, floor:50  },
 ];
 
 // Pad history array to exactly 60 points (null-fill the front)

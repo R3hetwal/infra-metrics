@@ -26,7 +26,7 @@ from typing import Callable, Optional
 
 from .config import get_config
 from ._gpu import NVML_AVAILABLE, gpu_before, gpu_after
-from ._metrics import ACTIVE_AGENTS, ERROR_COUNT, REQUEST_COUNT, REQUEST_LATENCY
+from ._metrics import ACTIVE_AGENTS, ERROR_COUNT, REQUEST_COUNT, REQUEST_LATENCY, PEAK_ACTIVE_AGENTS
 from ._system import record_system_metrics
 
 
@@ -68,6 +68,11 @@ def track(
                 before_mem: float = 0.0
 
                 ACTIVE_AGENTS.labels(svc, ep).inc()
+                # Track high-water mark — visible even after request completes
+                current = ACTIVE_AGENTS.labels(svc, ep)._value.get()
+                peak_g  = PEAK_ACTIVE_AGENTS.labels(svc, ep)
+                if current > peak_g._value.get():
+                    peak_g.set(current)
                 if use_gpu:
                     before_mem = gpu_before(svc, ep, cfg.gpu_device_index)
 
@@ -103,6 +108,11 @@ def track(
             before_mem: float = 0.0
 
             ACTIVE_AGENTS.labels(svc, ep).inc()
+            # Track high-water mark — visible even after request completes
+            current = ACTIVE_AGENTS.labels(svc, ep)._value.get()
+            peak_g  = PEAK_ACTIVE_AGENTS.labels(svc, ep)
+            if current > peak_g._value.get():
+                peak_g.set(current)
             if use_gpu:
                 before_mem = gpu_before(svc, ep, cfg.gpu_device_index)
 

@@ -46,29 +46,41 @@ GPU_MEM_DELTA = Gauge(
     "GPU VRAM delta for a single request (MB)",
     ["service", "endpoint"],
 )
+GPU_POWER_WATTS = Gauge(
+    "gpu_power_watts",
+    "GPU power draw (W) via NVML — 0 if unsupported",
+    ["service"],
+)
 
 # ── Internal snapshot ─────────────────────────────────────────────────────────
 
 
-def _snapshot(device_index: int) -> tuple[float, float]:
-    """Return (utilisation_pct, vram_used_mb) or (0, 0) if NVML unavailable."""
+def _snapshot(device_index: int) -> tuple[float, float, float]:
+    """Return (utilisation_pct, vram_used_mb, power_watts) or (0, 0, 0) if NVML unavailable."""
     if not NVML_AVAILABLE:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
     try:
         handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
         util = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
         mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        return float(util), mem_info.used / 1024 / 1024
+        try:
+            power_w = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW → W
+        except Exception:
+            power_w = 0.0
+        return float(util), mem_info.used / 1024 / 1024, power_w
     except Exception as exc:  # device disappeared, driver error, etc.
         logger.warning("GPU snapshot failed: %s", exc)
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
 
 
 def _record(service: str, endpoint: str, stage: str, device_index: int) -> float:
     """Snapshot + push to Prometheus. Returns vram_mb for delta arithmetic."""
-    util, mem = _snapshot(device_index)
+    util, mem, power_w = _snapshot(device_index)
     GPU_UTIL.labels(service, endpoint, stage).set(util)
     GPU_MEM.labels(service, endpoint, stage).set(mem)
+    # Record power at every "after" snapshot (one reading per completed request)
+    if stage == "after" and power_w > 0:
+        GPU_POWER_WATTS.labels(service).set(power_w)
     return mem
 
 
