@@ -83,10 +83,9 @@ Then no code change needed at all.
 Each service: one env var + one line of code. Metrics at `<port>/metrics`.
 
 ```
-stt             :8001/metrics   INFRA_METRICS_SERVICE=stt
-tts             :8002/metrics   INFRA_METRICS_SERVICE=tts
-ner             :8003/metrics   INFRA_METRICS_SERVICE=ner
-sentiment       :8004/metrics   INFRA_METRICS_SERVICE=sentiment
+speech_to_text             :<port>/metrics   INFRA_METRICS_SERVICE=stt
+ner             :<port>/metrics   INFRA_METRICS_SERVICE=ner
+sentiment_analysis      :<port>/metrics   INFRA_METRICS_SERVICE=sentiment
 ```
 
 ```python
@@ -199,15 +198,15 @@ monitoring/
 scrape_interval: 15s
 
 services:
-  - name: stt
+  - name: speech_to_text
     host: localhost
-    port: 8001
-  - name: tts
+    port: ****
+  - name: sentiment_analysis
     host: localhost
-    port: 8002
+    port: ****
   - name: ner
     host: 192.168.1.11     # different machine
-    port: 8003
+    port: ****
 ```
 
 ### Step 2 — Run setup once
@@ -233,6 +232,105 @@ python3 monitoring/generate_prometheus_config.py \
   --config monitoring/services.yaml \
   --out /etc/prometheus/prometheus.yml
 sudo systemctl reload prometheus
+```
+
+---
+
+## Web Dashboard (recommended — no Grafana needed)
+
+A browser-based live dashboard that scrapes your services directly.
+Auto-refreshes every 5s. Three tabs: Overview, Charts, Crash Log.
+
+### What you see
+
+- **Overview** — one card per service: active agents, requests, latency, CPU, RAM, GPU, VRAM + sparkline charts
+- **Charts** — all services on shared time-series graphs — spot which service spikes on load
+- **Crash Log** — every crash/error with full snapshot: time, service, reason, agents, CPU, RAM, GPU, VRAM — saved to dated files
+
+### Setup (one time)
+
+```bash
+# 1. Create monitoring folder on your server
+mkdir -p <path>/monitoring
+cd <path>/monitoring
+
+# 2. Copy files here (from repo or scp from dev machine)
+scp web_dashboard.py user@server:<path>/monitoring/
+scp monitoring/services.yaml user@server:<path>/monitoring/
+
+# 3. Create venv + install deps
+python3 -m venv env
+source env/bin/activate
+pip install fastapi uvicorn requests pyyaml
+```
+
+### Edit services.yaml
+
+```yaml
+scrape_interval: 15s
+services:
+  - name: speech_to_text
+    host: localhost   # IP only — no http://
+    port: ****
+  - name: sentiment_analysis
+    host: localhost
+    port: ****
+  - name: ner
+    host: localhost
+    port: ****
+```
+
+### Run
+
+```bash
+source env/bin/activate
+python3 web_dashboard.py --config services.yaml --port 9999
+# Open → http://your-server-ip:9999
+```
+
+### Run as systemd (survives reboot)
+
+Create `/etc/systemd/system/ai_dashboard.service`:
+
+```ini
+[Unit]
+Description=AI Monitoring Dashboard
+After=network.target
+
+[Service]
+User=ai001
+WorkingDirectory=<path>/monitoring
+ExecStart=<path>/monitoring/env/bin/python3 web_dashboard.py \
+  --config services.yaml \
+  --port 9999
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ai_dashboard
+sudo systemctl status ai_dashboard
+```
+
+### Crash logs
+
+Saved automatically to:
+```
+monitoring/crash_logs/
+├── crashes_2026-05-06.jsonl   ← one file per day, never overwritten
+└── crashes_2026-05-07.jsonl
+```
+
+Each line: timestamp, service, reason, agents, CPU, RAM, GPU, VRAM, error count.
+
+### Troubleshooting
+
+```bash
+sudo journalctl -u ai_dashboard -f          # live logs
+curl http://<ip>:****/metrics | head -5   # test service reachable
 ```
 
 ---

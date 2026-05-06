@@ -8,3 +8,5 @@ venv/
 .env
 *.egg
 .pytest_cache/
+infra_metrics.egg-info/
+dist/

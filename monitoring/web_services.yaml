@@ -1,0 +1,14 @@
+scrape_interval: 5s
+services:
+  - name: speech_to_text
+    host: localhost    # ← IP only, no http://
+    port: ****
+
+  - name: ner
+     host: localhost    
+     port: ****
+
+  - name: sentiment_analysis
+     host: localhost    
+     port: ****
+
