@@ -8,17 +8,17 @@ One decorator gives you: active agents, request count, latency, errors, CPU, RAM
 ## Install
 
 ```bash
-pip install git+https://github.com/YOUR-ORG/infra-metrics.git          # CPU only
-pip install "infra-metrics[gpu] @ git+https://github.com/YOUR-ORG/infra-metrics.git"  # + GPU
+pip install git+https://github.com/R3hetwal/infra-metrics.git          # CPU only
+pip install "infra-metrics[gpu] @ git+https://github.com/R3hetwal/infra-metrics.git"  # + GPU
 ```
 
 ### Upgrade existing install
 ```bash
 # Must use --force-reinstall (not --upgrade) — ensures new code is pulled
-pip install --force-reinstall git+https://github.com/YOUR-ORG/infra-metrics.git
+pip install --force-reinstall git+https://github.com/R3hetwal/infra-metrics.git
 
 # Inside a venv (most common — each service has its own venv)
-/path/to/service/env/bin/pip install --force-reinstall git+https://github.com/YOUR-ORG/infra-metrics.git
+/path/to/service/env/bin/pip install --force-reinstall https://github.com/R3hetwal/infra-metrics.git
 ```
 
 > **Note:** `--upgrade` only re-installs if the version number changed.
