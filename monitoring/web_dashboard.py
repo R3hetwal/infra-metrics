@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 infra-metrics enhanced web dashboard
-- Live sparkline charts per service card (agents, CPU, GPU, VRAM)
-- Full multi-service charts tab (all services on one graph)
-- Usage tab: Activity Monitor-style rolling time-series for CPU / RAM / GPU / VRAM
+- Live sparkline charts per service card (agents, CPU, GPU, VRAM, GPU Power)
+- Full multi-service charts tab (Activity Monitor style rolling time-series)
+- Usage tab: radar or activity-monitor line chart per metric
 - Detailed crash log: time, service, reason, agents, CPU, RAM, GPU, VRAM, errors
 - Crash logs saved to crash_logs/crashes_YYYY-MM-DD.jsonl (one file per day)
 - Auto-refreshes every 5s
@@ -28,15 +28,15 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DEFAULT_SERVICES = [
-    {"name": "stt",              "host": "localhost", "port": 8003},
-    {"name": "xtts",             "host": "localhost", "port": 8007},
-    {"name": "ner",              "host": "localhost", "port": 8004},
-    {"name": "sentiment",        "host": "localhost", "port": 8006},
-    {"name": "asterisk_ai",      "host": "localhost", "port": 8001},
+    {"name": "stt",              "host": "localhost", "port": ****},
+    {"name": "xtts",             "host": "localhost", "port": ****},
+    {"name": "ner",              "host": "localhost", "port": ****},
+    {"name": "sentiment",        "host": "localhost", "port": ****},
+    {"name": "asterisk_ai",      "host": "localhost", "port": ****},
 ]
 
 SERVICES      = list(DEFAULT_SERVICES)
-HISTORY_LEN   = 60    # 60 pts × 5 s = 5 min of history
+HISTORY_LEN   = 60    # 60 pts x 5 s = 5 min of history
 history       = defaultdict(lambda: defaultdict(lambda: deque(maxlen=HISTORY_LEN)))
 crash_log     = []
 last_up       = {}
@@ -130,29 +130,27 @@ def collect_all() -> list:
 
     for svc in SERVICES:
         name = svc["name"]
+        label = svc.get("metrics_label", name)
         m, err = scrape(svc)
         is_up  = m is not None
 
         def sv(metric, **kw): return sum_val(m or {}, metric, **kw) or 0
         def gv(metric, **kw): return get_val(m or {}, metric, **kw) or 0
 
-        lat_s = sv("service_request_latency_seconds_sum",   service=name)
-        lat_c = sv("service_request_latency_seconds_count", service=name) or 1
+        lat_s = sv("service_request_latency_seconds_sum",   service=label)
+        lat_c = sv("service_request_latency_seconds_count", service=label) or 1
 
         snap = {
-            "agents":      int(sv("active_agents_total",       service=name)),
-            "peak_agents": int(sv("peak_active_agents_total",  service=name)),
-            "requests":    int(sv("service_requests_total",    service=name)),
-            "errors":      int(sv("service_errors_total",      service=name)),
+            "agents":      int(sv("active_agents_total",              service=label)),
+            "requests":    int(sv("service_requests_total",           service=label)),
+            "errors":      int(sv("service_errors_total",             service=label)),
             "latency_ms":  round((lat_s / lat_c) * 1000, 1),
-            # Use service-level gauges (populated by background thread even at 0 requests)
-            "cpu":         round(gv("cpu_usage_percent_service",  service=name), 1),
-            "ram_mb":      round(gv("ram_usage_mb_service",       service=name), 0),
-            "cpu_watts":   round(gv("cpu_power_watts",            service=name), 1),
-            "gpu_util":    round(gv("gpu_utilization_percent",    service=name, stage="after"), 1),
-            "vram_mb":     round(gv("gpu_memory_used_mb",         service=name, stage="after"), 0),
-            "vram_delta":  round(sv("gpu_memory_delta_mb",        service=name), 1),
-            "gpu_watts":   round(gv("gpu_power_watts",            service=name), 1),
+            "cpu":         round(sv("cpu_usage_percent_service",      service=label), 1),
+            "ram_mb":      round(sv("ram_usage_mb_service",           service=label), 0),
+            "gpu_util":    round(gv("gpu_utilization_percent",        service=label, stage="after"), 1),
+            "vram_mb":     round(gv("gpu_memory_used_mb",             service=label, stage="after"), 0),
+            "vram_delta":  round(sv("gpu_memory_delta_mb",            service=label), 1),
+            "gpu_power_w": round(gv("gpu_power_watts",                service=label), 1),
         }
 
         was_up = last_up.get(name, True)
@@ -163,7 +161,7 @@ def collect_all() -> list:
         if is_up:
             prev_err = last_errors.get(name, 0)
             if snap["errors"] > prev_err:
-                log_crash(name, f"error spike → {snap['errors']} total errors", snap)
+                log_crash(name, f"error spike -> {snap['errors']} total errors", snap)
             last_errors[name] = snap["errors"]
             h = history[name]
             h["ts"].append(ts)
@@ -252,22 +250,7 @@ main{padding:24px 28px}
 .mf{height:100%;border-radius:2px;transition:width .5s}
 .dn-body{padding:16px;color:var(--rd);font-size:12px}
 
-/* Chart sub-nav */
-.chart-subnav{display:flex;gap:0;border-bottom:1px solid var(--bd);margin-bottom:20px}
-.csn{background:none;border:none;border-bottom:2px solid transparent;color:var(--mu);
-  font-family:inherit;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;
-  padding:10px 20px;cursor:pointer;transition:.2s}
-.csn.on{color:var(--pu);border-bottom-color:var(--pu)}
-.csn:hover:not(.on){color:var(--tx)}
-.cpane{display:none}.cpane.on{display:block}
-
-#chart-grid-ag,#chart-grid-lv,#chart-grid-cr{display:grid;grid-template-columns:repeat(2,1fr);gap:20px}
-.cg-box{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:16px}
-.cg-title{font-family:'Syne',sans-serif;font-size:13px;font-weight:800;color:#fff;margin-bottom:12px}
-.cg-box canvas{height:200px}
-
-/* ── Usage Tab — Activity Monitor style ─────────────────────────── */
-.am-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+/* ── Shared AM card style (used by Charts tab + Usage AM mode) ── */
 .am-card{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px}
 .am-header{display:flex;align-items:center;gap:0;border-bottom:1px solid var(--bd);padding-bottom:10px;flex-wrap:wrap;row-gap:6px}
 .am-title{font-family:'Syne',sans-serif;font-size:13px;font-weight:800;color:#fff}
@@ -276,7 +259,51 @@ main{padding:24px 28px}
 .am-leg-item{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--mu)}
 .am-swatch{width:8px;height:8px;border-radius:2px;flex-shrink:0}
 .am-val{color:var(--tx);font-weight:600;margin-left:2px}
-.am-chart-wrap{position:relative;height:190px}
+.am-chart-wrap{position:relative;height:200px}
+
+/* Charts tab sub-nav */
+.chart-subnav{display:flex;gap:0;border-bottom:1px solid var(--bd);margin-bottom:20px}
+.csn{background:none;border:none;border-bottom:2px solid transparent;color:var(--mu);
+  font-family:inherit;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;
+  padding:10px 20px;cursor:pointer;transition:.2s}
+.csn.on{color:var(--pu);border-bottom-color:var(--pu)}
+.csn:hover:not(.on){color:var(--tx)}
+.cpane{display:none}.cpane.on{display:block}
+
+/* Charts tab: 2-column grid of AM cards, taller charts */
+.charts-am-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.charts-am-grid .am-chart-wrap{height:240px}
+
+/* ── Usage Tab ─────────────────────────────────────────────────── */
+.usage-toolbar{
+  display:flex;align-items:center;gap:12px;margin-bottom:20px;
+  background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:10px 16px;
+}
+.usage-toolbar label{font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:var(--mu)}
+.chart-type-btns{display:flex;gap:6px;margin-left:auto}
+.ctb{
+  background:none;border:1px solid var(--bd);color:var(--mu);
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.5px;
+  padding:5px 12px;border-radius:6px;cursor:pointer;transition:.2s;
+}
+.ctb.on{background:rgba(86,212,221,.12);border-color:var(--cy);color:var(--cy)}
+.ctb:hover:not(.on){color:var(--tx);border-color:var(--tx)}
+
+/* Usage radar: 2-col grid */
+.usage-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.usage-card{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px}
+.usage-card-header{display:flex;align-items:baseline;justify-content:space-between}
+.usage-card-title{font-family:'Syne',sans-serif;font-size:13px;font-weight:800;color:#fff}
+.usage-card-peak{font-size:10px;color:var(--mu)}
+.usage-canvas-wrap{position:relative;height:220px}
+.usage-legend{display:flex;flex-wrap:wrap;gap:10px}
+.ul-item{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--mu)}
+.ul-swatch{width:8px;height:8px;border-radius:2px;flex-shrink:0}
+
+/* Usage AM: same 2-col AM grid */
+.usage-am-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.usage-am-grid .am-chart-wrap{height:200px}
 
 /* Crash log */
 #crash-wrap{background:var(--sf);border:1px solid var(--bd);border-radius:10px;overflow:hidden}
@@ -324,28 +351,163 @@ tr:hover td{background:var(--sf2)}
   <div id="cards"></div>
 </div>
 
-<!-- CHARTS -->
+<!-- CHARTS — Activity Monitor style, 4 sub-pages -->
 <div id="pane-charts" class="pane">
   <div class="chart-subnav">
     <button class="csn on" onclick="chartPage('agents-gpu',this)">Agents &amp; GPU</button>
     <button class="csn" onclick="chartPage('lat-vram',this)">Latency &amp; VRAM</button>
     <button class="csn" onclick="chartPage('cpu-ram',this)">CPU &amp; RAM</button>
+    <button class="csn" onclick="chartPage('gpu-power',this)">GPU Power</button>
   </div>
-  <div id="cpane-agents-gpu" class="cpane on"><div id="chart-grid-ag"></div></div>
-  <div id="cpane-lat-vram"   class="cpane"><div id="chart-grid-lv"></div></div>
-  <div id="cpane-cpu-ram"    class="cpane"><div id="chart-grid-cr"></div></div>
+
+  <div id="cpane-agents-gpu" class="cpane on">
+    <div class="charts-am-grid">
+      <div class="am-card">
+        <div class="am-header">
+          <span class="am-title">Active Agents</span>
+          <span class="am-cur" id="fc-cur-agents">—</span>
+          <div class="am-legend" id="fc-leg-agents"></div>
+        </div>
+        <div class="am-chart-wrap"><canvas id="fc-agents"></canvas></div>
+      </div>
+      <div class="am-card">
+        <div class="am-header">
+          <span class="am-title">GPU Utilisation</span>
+          <span class="am-cur" id="fc-cur-gpu_util">—</span>
+          <div class="am-legend" id="fc-leg-gpu_util"></div>
+        </div>
+        <div class="am-chart-wrap"><canvas id="fc-gpu_util"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="cpane-lat-vram" class="cpane">
+    <div class="charts-am-grid">
+      <div class="am-card">
+        <div class="am-header">
+          <span class="am-title">Avg Latency</span>
+          <span class="am-cur" id="fc-cur-latency_ms">—</span>
+          <div class="am-legend" id="fc-leg-latency_ms"></div>
+        </div>
+        <div class="am-chart-wrap"><canvas id="fc-latency_ms"></canvas></div>
+      </div>
+      <div class="am-card">
+        <div class="am-header">
+          <span class="am-title">GPU VRAM</span>
+          <span class="am-cur" id="fc-cur-vram_mb">—</span>
+          <div class="am-legend" id="fc-leg-vram_mb"></div>
+        </div>
+        <div class="am-chart-wrap"><canvas id="fc-vram_mb"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="cpane-cpu-ram" class="cpane">
+    <div class="charts-am-grid">
+      <div class="am-card">
+        <div class="am-header">
+          <span class="am-title">CPU Usage</span>
+          <span class="am-cur" id="fc-cur-cpu">—</span>
+          <div class="am-legend" id="fc-leg-cpu"></div>
+        </div>
+        <div class="am-chart-wrap"><canvas id="fc-cpu"></canvas></div>
+      </div>
+      <div class="am-card">
+        <div class="am-header">
+          <span class="am-title">Sys RAM Usage</span>
+          <span class="am-cur" id="fc-cur-ram_mb">—</span>
+          <div class="am-legend" id="fc-leg-ram_mb"></div>
+        </div>
+        <div class="am-chart-wrap"><canvas id="fc-ram_mb"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FIX Bug 2: GPU Power sub-page — fc-gpu_power canvas lives here -->
+  <div id="cpane-gpu-power" class="cpane">
+    <div class="charts-am-grid">
+      <div class="am-card">
+        <div class="am-header">
+          <span class="am-title">GPU Power Draw</span>
+          <span class="am-cur" id="fc-cur-gpu_power">—</span>
+          <div class="am-legend" id="fc-leg-gpu_power"></div>
+        </div>
+        <div class="am-chart-wrap"><canvas id="fc-gpu_power"></canvas></div>
+      </div>
+    </div>
+  </div>
 </div>
 
-<!-- USAGE — Activity Monitor style rolling charts -->
+<!-- USAGE — radar or activity-monitor line, 2 options only -->
 <div id="pane-usage" class="pane">
-  <div class="am-grid">
+  <div class="usage-toolbar">
+    <label>Chart type</label>
+    <div class="chart-type-btns">
+      <button class="ctb on" data-type="radar" onclick="setChartType('radar',this)">Radar</button>
+      <button class="ctb"    data-type="line"  onclick="setChartType('line',this)">Activity Monitor</button>
+    </div>
+    <label style="margin-left:16px">Normalize</label>
+    <select id="norm-select" onchange="setNormalize(this.value)"
+      style="background:var(--sf2);border:1px solid var(--bd);color:var(--tx);font-family:'JetBrains Mono',monospace;font-size:11px;padding:5px 10px;border-radius:6px;cursor:pointer;outline:none;margin-left:8px">
+      <option value="raw">Raw values</option>
+      <option value="pct">% of max</option>
+    </select>
+  </div>
+
+  <!-- Radar grid (2-col, 3 rows for 5 cards) -->
+  <div id="usage-radar-grid" class="usage-grid">
+    <div class="usage-card">
+      <div class="usage-card-header">
+        <span class="usage-card-title">CPU Usage</span>
+        <span class="usage-card-peak" id="peak-cpu">peak —</span>
+      </div>
+      <div class="usage-canvas-wrap"><canvas id="uc-cpu"></canvas></div>
+      <div class="usage-legend" id="leg-cpu"></div>
+    </div>
+    <div class="usage-card">
+      <div class="usage-card-header">
+        <span class="usage-card-title">System RAM</span>
+        <span class="usage-card-peak" id="peak-ram">peak —</span>
+      </div>
+      <div class="usage-canvas-wrap"><canvas id="uc-ram"></canvas></div>
+      <div class="usage-legend" id="leg-ram"></div>
+    </div>
+    <div class="usage-card">
+      <div class="usage-card-header">
+        <span class="usage-card-title">GPU Utilisation</span>
+        <span class="usage-card-peak" id="peak-gpu">peak —</span>
+      </div>
+      <div class="usage-canvas-wrap"><canvas id="uc-gpu"></canvas></div>
+      <div class="usage-legend" id="leg-gpu"></div>
+    </div>
+    <div class="usage-card">
+      <div class="usage-card-header">
+        <span class="usage-card-title">VRAM Used</span>
+        <span class="usage-card-peak" id="peak-vram">peak —</span>
+      </div>
+      <div class="usage-canvas-wrap"><canvas id="uc-vram"></canvas></div>
+      <div class="usage-legend" id="leg-vram"></div>
+    </div>
+    <!-- FIX Bug 3a: GPU Power radar card -->
+    <div class="usage-card">
+      <div class="usage-card-header">
+        <span class="usage-card-title">GPU Power</span>
+        <span class="usage-card-peak" id="peak-gpu_power">peak —</span>
+      </div>
+      <div class="usage-canvas-wrap"><canvas id="uc-gpu_power"></canvas></div>
+      <div class="usage-legend" id="leg-gpu_power"></div>
+    </div>
+  </div>
+
+  <!-- Activity Monitor line grid (2-col) -->
+  <div id="usage-am-grid" class="usage-am-grid" style="display:none">
     <div class="am-card">
       <div class="am-header">
         <span class="am-title">CPU Usage</span>
         <span class="am-cur" id="am-cur-cpu">—</span>
         <div class="am-legend" id="am-leg-cpu"></div>
       </div>
-      <div class="am-chart-wrap"><canvas id="uc-cpu"></canvas></div>
+      <div class="am-chart-wrap"><canvas id="am-cpu"></canvas></div>
     </div>
     <div class="am-card">
       <div class="am-header">
@@ -353,7 +515,7 @@ tr:hover td{background:var(--sf2)}
         <span class="am-cur" id="am-cur-ram">—</span>
         <div class="am-legend" id="am-leg-ram"></div>
       </div>
-      <div class="am-chart-wrap"><canvas id="uc-ram"></canvas></div>
+      <div class="am-chart-wrap"><canvas id="am-ram"></canvas></div>
     </div>
     <div class="am-card">
       <div class="am-header">
@@ -361,31 +523,25 @@ tr:hover td{background:var(--sf2)}
         <span class="am-cur" id="am-cur-gpu">—</span>
         <div class="am-legend" id="am-leg-gpu"></div>
       </div>
-      <div class="am-chart-wrap"><canvas id="uc-gpu"></canvas></div>
+      <div class="am-chart-wrap"><canvas id="am-gpu"></canvas></div>
     </div>
+    <!-- FIX Bug 1: restored am-vram canvas (was accidentally commented out) -->
     <div class="am-card">
       <div class="am-header">
         <span class="am-title">VRAM Used</span>
         <span class="am-cur" id="am-cur-vram">—</span>
         <div class="am-legend" id="am-leg-vram"></div>
       </div>
-      <div class="am-chart-wrap"><canvas id="uc-vram"></canvas></div>
+      <div class="am-chart-wrap"><canvas id="am-vram"></canvas></div>
     </div>
-    <div class="am-card">
-      <div class="am-header">
-        <span class="am-title">CPU Power</span>
-        <span class="am-cur" id="am-cur-cpuw">—</span>
-        <div class="am-legend" id="am-leg-cpuw"></div>
-      </div>
-      <div class="am-chart-wrap"><canvas id="uc-cpuw"></canvas></div>
-    </div>
+    <!-- FIX Bug 3b: GPU Power AM card with its own unique canvas id -->
     <div class="am-card">
       <div class="am-header">
         <span class="am-title">GPU Power</span>
-        <span class="am-cur" id="am-cur-gpuw">—</span>
-        <div class="am-legend" id="am-leg-gpuw"></div>
+        <span class="am-cur" id="am-cur-gpu_power">—</span>
+        <div class="am-legend" id="am-leg-gpu_power"></div>
       </div>
-      <div class="am-chart-wrap"><canvas id="uc-gpuw"></canvas></div>
+      <div class="am-chart-wrap"><canvas id="am-gpu_power"></canvas></div>
     </div>
   </div>
 </div>
@@ -397,7 +553,7 @@ tr:hover td{background:var(--sf2)}
       <h2>Crash &amp; Event Log</h2>
       <span class="cx-hint">Saved to crash_logs/crashes_YYYY-MM-DD.jsonl</span>
     </div>
-    <div id="cx-empty">✓ No crashes recorded this session</div>
+    <div id="cx-empty">&#10003; No crashes recorded this session</div>
     <table id="cx-table" style="display:none">
       <thead><tr>
         <th>Time</th><th>Service</th><th>Reason</th>
@@ -411,64 +567,161 @@ tr:hover td{background:var(--sf2)}
 
 <script>
 // ── Globals ────────────────────────────────────────────────────────────────────
-let sparkCharts={}, fullCharts={}, lastData=null;
-const COLORS=['#00d4d4','#3d9be9','#2ea84a','#d4a017','#e63946','#9d6fe8','#e07c2a'];
+let lastData = null;
+const COLORS = ['#00d4d4','#3d9be9','#2ea84a','#d4a017','#e63946','#9d6fe8','#e07c2a'];
+
+// Charts tab
+let fullCharts = {};
+const fcYMax   = {};
+
+// Usage tab state
+let currentChartType = 'radar';
+let currentNormalize = 'raw';
+let lastUsageSvcs    = null;
+// Radar chart instances
+let usageCharts = {};
+let usageYMax   = {};
+// AM line chart instances
+let amCharts = {};
+const amYMax = {};
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
-const mb = v => v>=1024?(v/1024).toFixed(1)+' GB':Math.round(v)+' MB';
+const mb = v => v >= 1024 ? (v/1024).toFixed(1)+' GB' : Math.round(v)+' MB';
 const vc = (v,w,c) => v>=c?'cr':v>=w?'wn':'';
-function mbar(pct) {
+function mbar(pct){
   const col = pct>=85?'var(--rd)':pct>=60?'var(--ye)':'var(--cy)';
-  return `<div class="mb"><div class="mf" style="width:${Math.min(pct,100)}%;background:${col}"></div></div>`;
+  return '<div class="mb"><div class="mf" style="width:'+Math.min(pct,100)+'%;background:'+col+'"></div></div>';
+}
+function amFmt(val, unit){
+  if(val == null || isNaN(val)) return '—';
+  if(unit === ' MB') return mb(val);
+  return val + unit;
 }
 
 // ── Tab switching ──────────────────────────────────────────────────────────────
-function tab(id, btn) {
-  document.querySelectorAll('.pane').forEach(p=>p.classList.remove('on'));
-  document.querySelectorAll('nav button').forEach(b=>b.classList.remove('on'));
+function tab(id, btn){
+  document.querySelectorAll('.pane').forEach(p => p.classList.remove('on'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('on'));
   document.getElementById('pane-'+id).classList.add('on');
   btn.classList.add('on');
   if(id==='charts' && lastData) renderFullCharts(lastData.services);
-  if(id==='usage'  && lastData) renderUsageTab(lastData.services);
+  if(id==='usage'  && lastData) renderUsageTab(lastData.services.filter(s=>s.up));
 }
 
 // ── Overview cards ─────────────────────────────────────────────────────────────
-function renderCard(s) {
+function renderCard(s){
   const ac = !s.up?'dn':s.errors>0?'wn':'up';
-  const badge = !s.up?'<span class="badge bdn">DOWN</span>':s.errors>0?'<span class="badge bwn">WARN</span>':'<span class="badge bup">UP</span>';
+  const badge = !s.up
+    ? '<span class="badge bdn">DOWN</span>'
+    : s.errors>0 ? '<span class="badge bwn">WARN</span>' : '<span class="badge bup">UP</span>';
   let body='';
   if(!s.up){
-    body=`<div class="dn-body">✕ ${s.error||'unreachable'}</div>`;
+    body='<div class="dn-body">&#10005; '+(s.error||'unreachable')+'</div>';
   } else {
-    body=`
-    <div class="cm">
-      <div class="mt"><span class="ml">Agents</span><span class="mv ${vc(s.agents,10,30)}">${s.agents}</span><span style="font-size:9px;color:var(--mu)"> peak&nbsp;${s.peak_agents}</span></div>
-      <div class="mt"><span class="ml">Requests</span><span class="mv">${s.requests.toLocaleString()}</span></div>
-      <div class="mt"><span class="ml">Latency</span><span class="mv ${vc(s.latency_ms,300,1000)}">${s.latency_ms}ms</span></div>
-      <div class="mt"><span class="ml">CPU</span><span class="mv ${vc(s.cpu,60,85)}">${s.cpu}%</span>${mbar(s.cpu)}</div>
-      <div class="mt"><span class="ml">CPU Power</span><span class="mv">${s.cpu_watts>0?s.cpu_watts.toFixed(1)+' W':'—'}</span></div>
-      <div class="mt"><span class="ml">Sys RAM</span><span class="mv">${mb(s.ram_mb)}</span></div>
-      <div class="mt"><span class="ml">Errors</span><span class="mv ${s.errors>0?'cr':''}">${s.errors}</span></div>
-      <div class="mt"><span class="ml">GPU</span><span class="mv ${vc(s.gpu_util,60,85)}">${s.gpu_util>0?s.gpu_util+'%':'—'}</span>${s.gpu_util>0?mbar(s.gpu_util):''}</div>
-      <div class="mt"><span class="ml">GPU Power</span><span class="mv">${s.gpu_watts>0?s.gpu_watts.toFixed(0)+' W':'—'}</span></div>
-      <div class="mt"><span class="ml">VRAM</span><span class="mv">${s.vram_mb>0?mb(s.vram_mb):'—'}</span></div>
-      <div class="mt"><span class="ml">VRAM Δ</span><span class="mv ${s.vram_delta>500?'wn':''}">${s.vram_delta>0?mb(s.vram_delta):'—'}</span></div>
-    </div>`;
+    body='<div class="cm">'
+      +'<div class="mt"><span class="ml">Agents</span><span class="mv '+vc(s.agents,10,30)+'">'+s.agents+'</span></div>'
+      +'<div class="mt"><span class="ml">Requests</span><span class="mv">'+s.requests.toLocaleString()+'</span></div>'
+      +'<div class="mt"><span class="ml">Latency</span><span class="mv '+vc(s.latency_ms,300,1000)+'">'+s.latency_ms+'ms</span></div>'
+      +'<div class="mt"><span class="ml">CPU</span><span class="mv '+vc(s.cpu,60,85)+'">'+s.cpu+'%</span>'+mbar(s.cpu)+'</div>'
+      +'<div class="mt"><span class="ml">Sys RAM</span><span class="mv">'+mb(s.ram_mb)+'</span></div>'
+      +'<div class="mt"><span class="ml">Errors</span><span class="mv '+(s.errors>0?'cr':'')+'">'+s.errors+'</span></div>'
+      +'<div class="mt"><span class="ml">GPU</span><span class="mv '+vc(s.gpu_util,60,85)+'">'+(s.gpu_util>0?s.gpu_util+'%':'—')+'</span>'+(s.gpu_util>0?mbar(s.gpu_util):'')+'</div>'
+      +'<div class="mt"><span class="ml">VRAM</span><span class="mv">'+(s.vram_mb>0?mb(s.vram_mb):'—')+'</span></div>'
+      +'<div class="mt"><span class="ml">GPU Power</span><span class="mv">'+(s.gpu_power_w>0?s.gpu_power_w+' W':'—')+'</span></div>'
+      +'</div>';
   }
-  return `<div class="card"><div class="ca ${ac}"></div>
-    <div class="ch">${badge}<span class="sn">${s.name}</span><span class="sp">:${s.port}</span></div>
-    ${body}</div>`;
+  return '<div class="card"><div class="ca '+ac+'"></div>'
+    +'<div class="ch">'+badge+'<span class="sn">'+s.name+'</span><span class="sp">:'+s.port+'</span></div>'
+    +body+'</div>';
 }
 
-// ── Full multi-service charts ──────────────────────────────────────────────────
-const CHART_PAGES = {
-  'agents-gpu': [{key:'agents',title:'Active Agents',unit:'agents'},{key:'gpu_util',title:'GPU Utilisation',unit:'%'}],
-  'lat-vram':   [{key:'latency_ms',title:'Avg Latency',unit:'ms'},{key:'vram_mb',title:'GPU VRAM',unit:'MB'}],
-  'cpu-ram':    [{key:'cpu',title:'CPU Usage',unit:'%'},{key:'ram_mb',title:'Sys RAM Usage',unit:'MB'}],
-};
-const GRID_IDS = {'agents-gpu':'chart-grid-ag','lat-vram':'chart-grid-lv','cpu-ram':'chart-grid-cr'};
+// ══════════════════════════════════════════════════════════════════════════════
+// CHARTS TAB — Activity Monitor style, identical engine to Usage AM mode
+// ══════════════════════════════════════════════════════════════════════════════
 
-function chartPage(id, btn) {
+const FC_DEFS = [
+  {canvasId:'fc-agents',    legId:'fc-leg-agents',    curId:'fc-cur-agents',    key:'agents',      unit:' agents',floor:10, fixedMax:null},
+  {canvasId:'fc-gpu_util',  legId:'fc-leg-gpu_util',  curId:'fc-cur-gpu_util',  key:'gpu_util',    unit:'%',      floor:100,fixedMax:100 },
+  {canvasId:'fc-latency_ms',legId:'fc-leg-latency_ms',curId:'fc-cur-latency_ms',key:'latency_ms',  unit:' ms',    floor:500,fixedMax:null},
+  {canvasId:'fc-vram_mb',   legId:'fc-leg-vram_mb',   curId:'fc-cur-vram_mb',   key:'vram_mb',     unit:' MB',    floor:512,fixedMax:null},
+  {canvasId:'fc-cpu',       legId:'fc-leg-cpu',       curId:'fc-cur-cpu',       key:'cpu',         unit:'%',      floor:100,fixedMax:100 },
+  {canvasId:'fc-ram_mb',    legId:'fc-leg-ram_mb',    curId:'fc-cur-ram_mb',    key:'ram_mb',      unit:' MB',    floor:512,fixedMax:null},
+  {canvasId:'fc-gpu_power', legId:'fc-leg-gpu_power', curId:'fc-cur-gpu_power', key:'gpu_power_w', unit:' W',     floor:50, fixedMax:null},
+  ];
+
+function fcPad(arr){
+  const a=[...arr]; while(a.length<60) a.unshift(null); return a.slice(-60);
+}
+function fcCeil(key, floor, datasets){
+  const allVals=datasets.flatMap(d=>d.data).filter(v=>v!=null&&!isNaN(v));
+  const dataMax=allVals.length?Math.max(...allVals):0;
+  if(!fcYMax[key]) fcYMax[key]=Math.max(dataMax*1.25, floor);
+  else if(dataMax>fcYMax[key]) fcYMax[key]=dataMax*1.1;
+  return fcYMax[key];
+}
+
+function renderFullCharts(svcs){
+  const fixedLabels=Array.from({length:60},(_,i)=>i);
+  const upSvcs=svcs.filter(s=>s.up);
+  FC_DEFS.forEach(({canvasId,legId,curId,key,unit,floor,fixedMax})=>{
+    const datasets=upSvcs
+      .filter(s=>(s.history?.[key]||[]).length)
+      .map((s,i)=>({
+        label:s.name,
+        data:fcPad(s.history[key]||[]),
+        borderColor:COLORS[i%COLORS.length],
+        backgroundColor:COLORS[i%COLORS.length]+'18',
+        borderWidth:1.5,pointRadius:0,tension:0.35,fill:true,spanGaps:false,
+      }));
+    const maxY=fixedMax||fcCeil(key,floor,datasets);
+    if(fullCharts[canvasId]){
+      const ch=fullCharts[canvasId];
+      while(ch.data.datasets.length>datasets.length) ch.data.datasets.pop();
+      datasets.forEach((ds,i)=>{ if(ch.data.datasets[i]) ch.data.datasets[i].data=ds.data; else ch.data.datasets.push(ds); });
+      ch.options.scales.y.max=maxY; ch.update('none');
+    } else {
+      const ctx=document.getElementById(canvasId);
+      if(!ctx||!datasets.length) return;
+      fullCharts[canvasId]=new Chart(ctx,{
+        type:'line',data:{labels:fixedLabels,datasets},
+        options:{
+          responsive:true,maintainAspectRatio:false,animation:false,
+          transitions:{active:{animation:{duration:0}},resize:{animation:{duration:0}}},
+          plugins:{
+            legend:{display:false},
+            tooltip:{
+              mode:'index',intersect:false,
+              backgroundColor:'#1c2333',borderColor:'#253047',borderWidth:1,
+              titleColor:'#5a6882',bodyColor:'#d0d7e3',
+              titleFont:{family:'JetBrains Mono',size:10},bodyFont:{family:'JetBrains Mono',size:11},
+              callbacks:{title:()=>'',label:c=>'  '+c.dataset.label+'  '+(c.parsed.y!=null?amFmt(c.parsed.y,unit):'—')}
+            }
+          },
+          scales:{
+            x:{display:false},
+            y:{beginAtZero:true,min:0,max:maxY,
+              ticks:{color:'#3d4f63',font:{size:9,family:'JetBrains Mono'},maxTicksLimit:5,
+                callback:v=>unit===' MB'?(v>=1024?(v/1024).toFixed(0)+'G':v+'M'):v+unit},
+              grid:{color:'#1c2433'}}
+          }
+        }
+      });
+    }
+    // Legend + peak
+    const legEl=document.getElementById(legId);
+    const curEl=document.getElementById(curId);
+    if(legEl) legEl.innerHTML=upSvcs.map((s,i)=>
+      '<span class="am-leg-item"><span class="am-swatch" style="background:'+COLORS[i%COLORS.length]+'"></span>'
+      +s.name+'<span class="am-val">'+amFmt(s[key],unit)+'</span></span>').join('');
+    if(curEl&&upSvcs.length){
+      const vals=upSvcs.map(s=>s[key]||0);
+      const pi=vals.indexOf(Math.max(...vals));
+      curEl.textContent='peak '+amFmt(vals[pi],unit)+' · '+(upSvcs[pi]?.name||'');
+    }
+  });
+}
+
+function chartPage(id, btn){
   document.querySelectorAll('.cpane').forEach(p=>p.classList.remove('on'));
   document.querySelectorAll('.csn').forEach(b=>b.classList.remove('on'));
   document.getElementById('cpane-'+id).classList.add('on');
@@ -476,218 +729,196 @@ function chartPage(id, btn) {
   if(lastData) renderFullCharts(lastData.services);
 }
 
-const yMax = {};
-function stableMax(key, datasets) {
-  const allVals = datasets.flatMap(d=>d.data).filter(v=>v!=null&&!isNaN(v));
-  const dataMax = allVals.length ? Math.max(...allVals) : 0;
-  const floors = {gpu_util:100, cpu:100, latency_ms:500, agents:10, ram_mb:512, vram_mb:512};
-  if(!yMax[key]) yMax[key] = Math.max(dataMax * 1.2, floors[key]||10);
-  else if(dataMax > yMax[key]) yMax[key] = dataMax * 1.1;
-  return yMax[key];
+// ══════════════════════════════════════════════════════════════════════════════
+// USAGE TAB — Radar mode
+// ══════════════════════════════════════════════════════════════════════════════
+
+const USAGE_DEFS=[
+  {id:'uc-cpu',       key:'cpu',         unit:'%',  peakId:'peak-cpu',       legId:'leg-cpu'},
+  {id:'uc-ram',       key:'ram_mb',      unit:'MB', peakId:'peak-ram',       legId:'leg-ram'},
+  {id:'uc-gpu',       key:'gpu_util',    unit:'%',  peakId:'peak-gpu',       legId:'leg-gpu'},
+  {id:'uc-vram',      key:'vram_mb',     unit:'MB', peakId:'peak-vram',      legId:'leg-vram'},
+  {id:'uc-gpu_power', key:'gpu_power_w', unit:'W',  peakId:'peak-gpu_power', legId:'leg-gpu_power'},
+  ];
+
+function usageCeil(key, vals){
+  const floors={cpu:100,gpu_util:100,ram_mb:512,vram_mb:512};
+  const dataMax=Math.max(0,...vals.filter(v=>v!=null&&!isNaN(v)));
+  if(!usageYMax[key]) usageYMax[key]=Math.max(dataMax*1.25,floors[key]||10);
+  else if(dataMax>usageYMax[key]) usageYMax[key]=dataMax*1.1;
+  return usageYMax[key];
 }
 
-function renderFullCharts(svcs) {
-  const fixedLabels = Array.from({length:60}, (_,i)=>i);
-  Object.entries(CHART_PAGES).forEach(([page, defs]) => {
-    const grid = document.getElementById(GRID_IDS[page]);
-    if(!grid) return;
-    if(!grid.innerHTML) {
-      grid.innerHTML = defs.map(d=>`
-        <div class="cg-box">
-          <div class="cg-title">${d.title}</div>
-          <canvas id="fc-${d.key}" height="200"></canvas>
-        </div>`).join('');
-    }
-    defs.forEach(({key}) => {
-      const pad = arr => { const a=[...arr]; while(a.length<60) a.unshift(null); return a.slice(-60); };
-      const datasets = svcs.filter(s=>s.up&&(s.history?.[key]||[]).length).map((s,i)=>({
-        label: s.name,
-        data: pad(s.history[key]||[]),
-        borderColor: COLORS[i%COLORS.length],
-        backgroundColor: COLORS[i%COLORS.length]+'18',
-        borderWidth:2, pointRadius:0, tension:0.3, fill:true, spanGaps:false
-      }));
-      const id=`fc-${key}`;
-      if(!datasets.length) return;
-      const maxY = stableMax(key, datasets);
-      if(fullCharts[id]) {
-        fullCharts[id].data.datasets.forEach((d,i)=>{ if(datasets[i]) d.data=datasets[i].data; });
-        fullCharts[id].options.scales.y.max = maxY;
-        fullCharts[id].update('none');
-        return;
-      }
+function normalizeVals(vals, key){
+  if(currentNormalize==='raw') return vals;
+  const ceil=usageCeil(key,vals);
+  return vals.map(v=>ceil>0?+((v/ceil)*100).toFixed(1):0);
+}
+
+function renderLegend(legId, svcs, peakId, vals, unit){
+  const leg=document.getElementById(legId);
+  const peak=document.getElementById(peakId);
+  if(leg) leg.innerHTML=svcs.map((s,i)=>
+    '<span class="ul-item"><span class="ul-swatch" style="background:'+COLORS[i%COLORS.length]+'"></span>'+s.name+'</span>').join('');
+  if(peak){
+    const mx=Math.max(...vals.filter(v=>v!=null));
+    const sv=svcs[vals.indexOf(mx)];
+    peak.textContent='peak '+(unit==='MB'?mb(mx):mx+unit)+' · '+(sv?.name||'');
+  }
+}
+
+function renderUsageRadar(svcs){
+  USAGE_DEFS.forEach(({id,key,unit,peakId,legId})=>{
+    const rawVals=svcs.map(s=>s[key]||0);
+    renderLegend(legId,svcs,peakId,rawVals,unit);
+    const data=normalizeVals(rawVals,key);
+    const ceil=usageCeil(key,rawVals);
+    const maxR=currentNormalize==='pct'?100:Math.round(ceil);
+    if(usageCharts[id]){
+      const ch=usageCharts[id];
+      ch.data.datasets[0].data=data;
+      ch.data.labels=svcs.map(s=>s.name);
+      if(ch.options.scales?.r) ch.options.scales.r.max=maxR;
+      ch.update('none');
+    } else {
       const ctx=document.getElementById(id); if(!ctx) return;
-      fullCharts[id]=new Chart(ctx,{type:'line',data:{labels:fixedLabels,datasets},options:{
-        responsive:true, maintainAspectRatio:false,
-        plugins:{legend:{labels:{color:'#8b9ab5',font:{family:'JetBrains Mono',size:10}}}},
-        scales:{
-          x:{display:false},
-          y:{ticks:{color:'#3d4f63',font:{size:10}},grid:{color:'#1c2433'},
-             beginAtZero:true, min:0, max:maxY}
+      usageCeil(key,rawVals);
+      usageCharts[id]=new Chart(ctx,{
+        type:'radar',
+        data:{
+          labels:svcs.map(s=>s.name),
+          datasets:[{
+            label:key,data,
+            backgroundColor:'#56d4dd22',borderColor:'#56d4dd',
+            pointBackgroundColor:svcs.map((_,i)=>COLORS[i%COLORS.length]),
+            pointBorderColor:'#fff',pointRadius:5,borderWidth:2,
+          }]
         },
-        animation:false,
-        transitions:{active:{animation:{duration:0}},resize:{animation:{duration:0}},show:{animation:{duration:0}},hide:{animation:{duration:0}}}
-      }});
-    });
+        options:{
+          responsive:true,maintainAspectRatio:false,animation:false,
+          transitions:{active:{animation:{duration:0}},resize:{animation:{duration:0}}},
+          plugins:{legend:{display:false}},
+          scales:{r:{
+            beginAtZero:true,min:0,max:maxR,
+            ticks:{color:'#3d4f63',font:{size:9,family:'JetBrains Mono'},backdropColor:'transparent',count:5,
+              callback:v=>currentNormalize==='pct'?v+'%':v},
+            grid:{color:'#253047'},angleLines:{color:'#253047'},
+            pointLabels:{color:'#8b9ab5',font:{size:10,family:'JetBrains Mono'}},
+          }}
+        }
+      });
+    }
   });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// USAGE TAB — Activity Monitor style rolling time-series
-// 4 panels always visible: CPU, RAM, GPU, VRAM
-// Each line = one service, scrolls left every 5 s, same mechanic as Charts tab
+// USAGE TAB — Activity Monitor line mode
 // ══════════════════════════════════════════════════════════════════════════════
 
-let usageCharts = {};
-const amYMax    = {};   // stable Y ceiling — only grows
-
-const AM_DEFS = [
-  { canvasId:'uc-cpu',  legId:'am-leg-cpu',  curId:'am-cur-cpu',
-    key:'cpu',       title:'CPU Usage',       unit:'%',  fixedMax:100,  floor:100 },
-  { canvasId:'uc-ram',  legId:'am-leg-ram',  curId:'am-cur-ram',
-    key:'ram_mb',    title:'System RAM',      unit:' MB',fixedMax:null, floor:512 },
-  { canvasId:'uc-gpu',  legId:'am-leg-gpu',  curId:'am-cur-gpu',
-    key:'gpu_util',  title:'GPU Utilisation', unit:'%',  fixedMax:100,  floor:100 },
-  { canvasId:'uc-vram', legId:'am-leg-vram', curId:'am-cur-vram',
-    key:'vram_mb',   title:'VRAM Used',       unit:' MB',fixedMax:null, floor:512 },
-  { canvasId:'uc-cpuw', legId:'am-leg-cpuw', curId:'am-cur-cpuw',
-    key:'cpu_watts', title:'CPU Power',       unit:' W', fixedMax:null, floor:50  },
-  { canvasId:'uc-gpuw', legId:'am-leg-gpuw', curId:'am-cur-gpuw',
-    key:'gpu_watts', title:'GPU Power',       unit:' W', fixedMax:null, floor:50  },
+// FIX Bug 3c: added gpu_power_w entry; canvas id am-gpu_power is unique
+const AM_USAGE_DEFS=[
+  {canvasId:'am-cpu',       legId:'am-leg-cpu',       curId:'am-cur-cpu',       key:'cpu',         unit:'%',  floor:100,fixedMax:100 },
+  {canvasId:'am-ram',       legId:'am-leg-ram',       curId:'am-cur-ram',       key:'ram_mb',      unit:' MB',floor:512,fixedMax:null},
+  {canvasId:'am-gpu',       legId:'am-leg-gpu',       curId:'am-cur-gpu',       key:'gpu_util',    unit:'%',  floor:100,fixedMax:100 },
+  {canvasId:'am-vram',      legId:'am-leg-vram',      curId:'am-cur-vram',      key:'vram_mb',     unit:' MB',floor:512,fixedMax:null},
+  {canvasId:'am-gpu_power', legId:'am-leg-gpu_power', curId:'am-cur-gpu_power', key:'gpu_power_w', unit:' W', floor:50, fixedMax:null},
 ];
 
-// Pad history array to exactly 60 points (null-fill the front)
-function amPad(arr) {
-  const a = [...arr];
-  while(a.length < 60) a.unshift(null);
-  return a.slice(-60);
-}
-
-// Y ceiling that only grows — prevents chart rescaling on every tick
-function amCeil(key, floor, datasets) {
-  const allVals = datasets.flatMap(d => d.data).filter(v => v != null && !isNaN(v));
-  const dataMax = allVals.length ? Math.max(...allVals) : 0;
-  if(!amYMax[key]) amYMax[key] = Math.max(dataMax * 1.25, floor);
-  else if(dataMax > amYMax[key]) amYMax[key] = dataMax * 1.1;
+function amCeil(key,floor,datasets){
+  const allVals=datasets.flatMap(d=>d.data).filter(v=>v!=null&&!isNaN(v));
+  const dataMax=allVals.length?Math.max(...allVals):0;
+  if(!amYMax[key]) amYMax[key]=Math.max(dataMax*1.25,floor);
+  else if(dataMax>amYMax[key]) amYMax[key]=dataMax*1.1;
   return amYMax[key];
 }
+function amPad(arr){ const a=[...arr]; while(a.length<60) a.unshift(null); return a.slice(-60); }
 
-// Format a value for display in the legend / header
-function amFmt(val, unit) {
-  if(val == null || isNaN(val)) return '—';
-  if(unit === ' MB') return mb(val);
-  return val + unit;
-}
-
-function renderUsageTab(svcs) {
-  const fixedLabels = Array.from({length:60}, (_, i) => i);
-  const upSvcs = svcs.filter(s => s.up);
-
-  AM_DEFS.forEach(({ canvasId, legId, curId, key, unit, fixedMax, floor }) => {
-
-    // Build datasets from history (same shape as Charts tab)
-    const datasets = upSvcs
-      .filter(s => (s.history?.[key] || []).length)
-      .map((s, i) => ({
-        label: s.name,
-        data: amPad(s.history[key] || []),
-        borderColor:     COLORS[i % COLORS.length],
-        backgroundColor: COLORS[i % COLORS.length] + '18',
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.35,
-        fill: true,
-        spanGaps: false,
+function renderUsageAM(svcs){
+  const fixedLabels=Array.from({length:60},(_,i)=>i);
+  AM_USAGE_DEFS.forEach(({canvasId,legId,curId,key,unit,floor,fixedMax})=>{
+    const datasets=svcs
+      .filter(s=>(s.history?.[key]||[]).length)
+      .map((s,i)=>({
+        label:s.name,data:amPad(s.history[key]||[]),
+        borderColor:COLORS[i%COLORS.length],backgroundColor:COLORS[i%COLORS.length]+'18',
+        borderWidth:1.5,pointRadius:0,tension:0.35,fill:true,spanGaps:false,
       }));
-
-    const maxY = fixedMax || amCeil(key, floor, datasets);
-
-    // ── Update existing chart ──────────────────────────────────────
-    if(usageCharts[canvasId]) {
-      const ch = usageCharts[canvasId];
-      // Sync dataset count (services may come/go)
-      while(ch.data.datasets.length > datasets.length) ch.data.datasets.pop();
-      datasets.forEach((ds, i) => {
-        if(ch.data.datasets[i]) {
-          ch.data.datasets[i].data = ds.data;
-        } else {
-          ch.data.datasets.push(ds);
-        }
-      });
-      ch.options.scales.y.max = maxY;
-      ch.update('none');
+    const maxY=fixedMax||amCeil(key,floor,datasets);
+    if(amCharts[canvasId]){
+      const ch=amCharts[canvasId];
+      while(ch.data.datasets.length>datasets.length) ch.data.datasets.pop();
+      datasets.forEach((ds,i)=>{ if(ch.data.datasets[i]) ch.data.datasets[i].data=ds.data; else ch.data.datasets.push(ds); });
+      ch.options.scales.y.max=maxY; ch.update('none');
     } else {
-      // ── Create chart ───────────────────────────────────────────────
-      const ctx = document.getElementById(canvasId);
-      if(!ctx || !datasets.length) return;
-      usageCharts[canvasId] = new Chart(ctx, {
-        type: 'line',
-        data: { labels: fixedLabels, datasets },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          animation: false,
-          transitions: {
-            active:{animation:{duration:0}},
-            resize:{animation:{duration:0}},
-          },
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              mode: 'index',
-              intersect: false,
-              backgroundColor: '#1c2333',
-              borderColor: '#253047',
-              borderWidth: 1,
-              titleColor: '#5a6882',
-              bodyColor: '#d0d7e3',
-              titleFont: { family:'JetBrains Mono', size:10 },
-              bodyFont:  { family:'JetBrains Mono', size:11 },
-              callbacks: {
-                title: () => '',
-                label: c => `  ${c.dataset.label}  ${c.parsed.y != null ? amFmt(c.parsed.y, unit) : '—'}`,
-              }
+      const ctx=document.getElementById(canvasId);
+      if(!ctx||!datasets.length) return;
+      amCharts[canvasId]=new Chart(ctx,{
+        type:'line',data:{labels:fixedLabels,datasets},
+        options:{
+          responsive:true,maintainAspectRatio:false,animation:false,
+          transitions:{active:{animation:{duration:0}},resize:{animation:{duration:0}}},
+          plugins:{
+            legend:{display:false},
+            tooltip:{
+              mode:'index',intersect:false,
+              backgroundColor:'#1c2333',borderColor:'#253047',borderWidth:1,
+              titleColor:'#5a6882',bodyColor:'#d0d7e3',
+              titleFont:{family:'JetBrains Mono',size:10},bodyFont:{family:'JetBrains Mono',size:11},
+              callbacks:{title:()=>'',label:c=>'  '+c.dataset.label+'  '+(c.parsed.y!=null?amFmt(c.parsed.y,unit):'—')}
             }
           },
-          scales: {
-            x: { display: false },
-            y: {
-              beginAtZero: true, min: 0, max: maxY,
-              ticks: {
-                color: '#3d4f63',
-                font: { size: 9, family:'JetBrains Mono' },
-                maxTicksLimit: 5,
-                callback: v => unit === ' MB' ? (v >= 1024 ? (v/1024).toFixed(0)+'G' : v+'M') : v + unit,
-              },
-              grid: { color: '#1c2433' },
-            }
+          scales:{
+            x:{display:false},
+            y:{beginAtZero:true,min:0,max:maxY,
+              ticks:{color:'#3d4f63',font:{size:9,family:'JetBrains Mono'},maxTicksLimit:5,
+                callback:v=>unit===' MB'?(v>=1024?(v/1024).toFixed(0)+'G':v+'M'):v+unit},
+              grid:{color:'#1c2433'}}
           }
         }
       });
     }
-
-    // ── Update legend with current values ─────────────────────────
-    const legEl = document.getElementById(legId);
-    const curEl = document.getElementById(curId);
-    if(legEl) {
-      legEl.innerHTML = upSvcs.map((s, i) => `
-        <span class="am-leg-item">
-          <span class="am-swatch" style="background:${COLORS[i%COLORS.length]}"></span>
-          ${s.name}<span class="am-val">${amFmt(s[key], unit)}</span>
-        </span>`).join('');
-    }
-    // Header: show highest current value across services
-    if(curEl && upSvcs.length) {
-      const vals = upSvcs.map(s => s[key] || 0);
-      const peakIdx = vals.indexOf(Math.max(...vals));
-      const peak = vals[peakIdx];
-      curEl.textContent = `peak ${amFmt(peak, unit)} · ${upSvcs[peakIdx]?.name || ''}`;
+    // Legend + peak
+    const legEl=document.getElementById(legId);
+    const curEl=document.getElementById(curId);
+    if(legEl) legEl.innerHTML=svcs.map((s,i)=>
+      '<span class="am-leg-item"><span class="am-swatch" style="background:'+COLORS[i%COLORS.length]+'"></span>'
+      +s.name+'<span class="am-val">'+amFmt(s[key],unit)+'</span></span>').join('');
+    if(curEl&&svcs.length){
+      const vals=svcs.map(s=>s[key]||0);
+      const pi=vals.indexOf(Math.max(...vals));
+      curEl.textContent='peak '+amFmt(vals[pi],unit)+' · '+(svcs[pi]?.name||'');
     }
   });
 }
 
+// ── Usage tab dispatcher ──────────────────────────────────────────────────────
+function renderUsageTab(svcs){
+  lastUsageSvcs=svcs;
+  if(!svcs||!svcs.length) return;
+  if(currentChartType==='radar') renderUsageRadar(svcs);
+  else renderUsageAM(svcs);
+}
+
+function setChartType(type, btn){
+  currentChartType=type;
+  document.querySelectorAll('.ctb').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');
+  // Swap visible grids
+  document.getElementById('usage-radar-grid').style.display=type==='radar'?'':'none';
+  document.getElementById('usage-am-grid').style.display=type==='line'?'':'none';
+  if(lastUsageSvcs) renderUsageTab(lastUsageSvcs);
+}
+
+function setNormalize(val){
+  currentNormalize=val;
+  // Destroy + rebuild radar charts with new scale
+  Object.values(usageCharts).forEach(ch=>ch.destroy());
+  usageCharts={}; usageYMax={};
+  if(lastUsageSvcs) renderUsageTab(lastUsageSvcs);
+}
+
 // ── Crash log ──────────────────────────────────────────────────────────────────
-function renderCrashes(crashes) {
+function renderCrashes(crashes){
   const empty=document.getElementById('cx-empty');
   const table=document.getElementById('cx-table');
   const tbody=document.getElementById('cx-body');
@@ -697,22 +928,22 @@ function renderCrashes(crashes) {
   document.getElementById('s-cr').textContent=todayN;
   if(!visible.length){empty.style.display='';table.style.display='none';return;}
   empty.style.display='none';table.style.display='';
-  tbody.innerHTML=[...visible].reverse().map(c=>`<tr>
-    <td class="cts">${c.ts}</td>
-    <td class="csvc">${c.service}</td>
-    <td class="creason">${c.reason}</td>
-    <td class="cval">${c.agents??'—'}</td>
-    <td class="cval">${c.cpu!=null?c.cpu+'%':'—'}</td>
-    <td class="cval">${c.ram_mb?Math.round(c.ram_mb)+' MB':'—'}</td>
-    <td class="cval">${c.gpu_util!=null?c.gpu_util+'%':'—'}</td>
-    <td class="cval">${c.vram_mb?Math.round(c.vram_mb)+' MB':'—'}</td>
-    <td class="cval ${c.errors>0?'creason':''}">${c.errors??'—'}</td>
-  </tr>`).join('');
+  tbody.innerHTML=[...visible].reverse().map(c=>'<tr>'
+    +'<td class="cts">'+c.ts+'</td>'
+    +'<td class="csvc">'+c.service+'</td>'
+    +'<td class="creason">'+c.reason+'</td>'
+    +'<td class="cval">'+(c.agents??'—')+'</td>'
+    +'<td class="cval">'+(c.cpu!=null?c.cpu+'%':'—')+'</td>'
+    +'<td class="cval">'+(c.ram_mb?Math.round(c.ram_mb)+' MB':'—')+'</td>'
+    +'<td class="cval">'+(c.gpu_util!=null?c.gpu_util+'%':'—')+'</td>'
+    +'<td class="cval">'+(c.vram_mb?Math.round(c.vram_mb)+' MB':'—')+'</td>'
+    +'<td class="cval '+(c.errors>0?'creason':'')+'">'+(c.errors??'—')+'</td>'
+    +'</tr>').join('');
 }
 
 // ── Main refresh loop ──────────────────────────────────────────────────────────
-async function refresh() {
-  try {
+async function refresh(){
+  try{
     const res=await fetch('/api/metrics');
     const data=await res.json();
     lastData=data;
@@ -723,11 +954,9 @@ async function refresh() {
     document.getElementById('s-dn').textContent=svcs.length-up;
     document.getElementById('s-ag').textContent=svcs.reduce((a,s)=>a+s.agents,0);
     document.getElementById('s-er').textContent=svcs.reduce((a,s)=>a+s.errors,0);
-
     document.getElementById('cards').innerHTML=svcs.map(renderCard).join('');
-
     if(document.getElementById('pane-charts').classList.contains('on')) renderFullCharts(svcs);
-    if(document.getElementById('pane-usage').classList.contains('on'))  renderUsageTab(svcs);
+    if(document.getElementById('pane-usage').classList.contains('on'))  renderUsageTab(svcs.filter(s=>s.up));
     renderCrashes(data.crashes);
   } catch(e){ console.error(e); }
 }
@@ -756,6 +985,6 @@ if __name__ == "__main__":
 
     load_crash_history()
     print(f"Loaded {len(crash_log)} crash entries from history")
-    print(f"\nDashboard  → http://localhost:{args.port}")
-    print(f"Crash logs → {CRASH_DIR.resolve()}/crashes_YYYY-MM-DD.jsonl\n")
+    print(f"\nDashboard  -> http://localhost:{args.port}")
+    print(f"Crash logs -> {CRASH_DIR.resolve()}/crashes_YYYY-MM-DD.jsonl\n")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
