@@ -1,7 +1,7 @@
 # infra-metrics
 
 Unified Prometheus observability for Python AI services.
-One decorator gives you: active agents, request count, latency, errors, CPU, RAM, and GPU — served at `/metrics` on your existing service port.
+One decorator gives you: active agents, request count, latency, errors, CPU, RAM, GPU, and GPU power — served at `/metrics` on your existing service port.
 
 ---
 
@@ -84,8 +84,8 @@ Each service: one env var + one line of code. Metrics at `<port>/metrics`.
 
 ```
 speech_to_text             :<port>/metrics   INFRA_METRICS_SERVICE=stt
-ner             :<port>/metrics   INFRA_METRICS_SERVICE=ner
-sentiment_analysis      :<port>/metrics   INFRA_METRICS_SERVICE=sentiment
+ner                        :<port>/metrics   INFRA_METRICS_SERVICE=ner
+sentiment_analysis         :<port>/metrics   INFRA_METRICS_SERVICE=sentiment
 ```
 
 ```python
@@ -117,17 +117,23 @@ start_metrics_server(port=9100)
 
 ## Metrics captured per request (all automatic via @track)
 
-| Metric | Type | What it means |
-|---|---|---|
-| `active_agents_total` | Gauge | Concurrent requests in-flight right now |
-| `service_requests_total` | Counter | Total requests (ok / error) |
-| `service_request_latency_seconds` | Histogram | Response time |
-| `service_errors_total` | Counter | Exceptions by type |
-| `cpu_usage_percent` | Gauge | Process CPU % |
-| `ram_usage_mb` | Gauge | Process RAM (MB) |
-| `gpu_utilization_percent` | Gauge | GPU util % before/after |
-| `gpu_memory_used_mb` | Gauge | VRAM used (MB) |
-| `gpu_memory_delta_mb` | Gauge | VRAM change per request |
+| Metric | Type | When | What it means |
+|---|---|---|---|
+| `active_agents_total` | Gauge | In-flight | Concurrent requests running right now |
+| `service_requests_total` | Counter | Per request | Total requests (ok / error) |
+| `service_request_latency_seconds` | Histogram | Per request | End-to-end response time |
+| `service_errors_total` | Counter | Per request | Unhandled exceptions by type |
+| `cpu_usage_percent` | Gauge | Per request | Process CPU % at request time |
+| `ram_usage_mb` | Gauge | Per request | Process RSS (MB) at request time |
+| `cpu_usage_percent_service` | Gauge | **Always** | Process CPU % — background poller |
+| `ram_usage_mb_service` | Gauge | **Always** | Process RSS (MB) — background poller |
+| `gpu_utilization_percent` | Gauge | Per request | GPU util % before/after |
+| `gpu_memory_used_mb` | Gauge | Per request | VRAM used (MB) |
+| `gpu_memory_delta_mb` | Gauge | Per request | VRAM change per request |
+| `gpu_power_watts` | Gauge | **Always** | GPU package power draw (W) via NVML |
+| `cpu_power_watts` | Gauge | **Always** | CPU package power draw (W) via Intel RAPL |
+
+> **Note:** `_service` variants and power metrics are polled continuously in the background and are always populated — even at idle with zero requests. The plain `cpu_usage_percent` / `ram_usage_mb` are only recorded during active `@track()` calls. The web dashboard uses the `_service` variants for the overview cards.
 
 GPU metrics silently skipped if `pynvml` not installed.
 
@@ -205,7 +211,7 @@ services:
     host: localhost
     port: ****
   - name: ner
-    host: 192.168.1.11     # different machine
+    host: localhost        # different machine? use its IP
     port: ****
 ```
 
@@ -239,12 +245,13 @@ sudo systemctl reload prometheus
 ## Web Dashboard (recommended — no Grafana needed)
 
 A browser-based live dashboard that scrapes your services directly.
-Auto-refreshes every 5s. Three tabs: Overview, Charts, Crash Log.
+Auto-refreshes every 5s. Four tabs: Overview, Charts, Usage, Crash Log.
 
 ### What you see
 
-- **Overview** — one card per service: active agents, requests, latency, CPU, RAM, GPU, VRAM + sparkline charts
-- **Charts** — all services on shared time-series graphs — spot which service spikes on load
+- **Overview** — one card per service: active agents, requests, latency, CPU, RAM, errors, GPU util, VRAM, GPU power draw
+- **Charts** — all services on shared rolling time-series graphs (Agents & GPU, Latency & VRAM, CPU & RAM, GPU Power) — spot which service spikes on load
+- **Usage** — radar or activity-monitor view comparing all services side-by-side across CPU, RAM, GPU, VRAM, and GPU power
 - **Crash Log** — every crash/error with full snapshot: time, service, reason, agents, CPU, RAM, GPU, VRAM — saved to dated files
 
 ### Setup (one time)
@@ -267,7 +274,8 @@ pip install fastapi uvicorn requests pyyaml
 ### Edit services.yaml
 
 ```yaml
-scrape_interval: 15s
+scrape_interval: 5s
+
 services:
   - name: speech_to_text
     host: localhost   # IP only — no http://
@@ -279,6 +287,25 @@ services:
     host: localhost
     port: ****
 ```
+
+#### `metrics_label` — when your service name differs from `INFRA_METRICS_SERVICE`
+
+By default the dashboard matches metrics using the `name` field. If the `INFRA_METRICS_SERVICE`
+environment variable on a service is set to a different value than `name`, add `metrics_label`
+to tell the dashboard which label to filter by:
+
+```yaml
+services:
+  - name: xtts                    # display name shown in the dashboard
+    host: localhost
+    port: ****
+    metrics_label: xtts_streaming  # value of INFRA_METRICS_SERVICE on that process
+                                   # omit this field if name matches INFRA_METRICS_SERVICE
+```
+
+> **When do you need this?** If you run `systemctl show your_service | grep INFRA_METRICS` and
+> the value doesn't match the `name:` in services.yaml, add `metrics_label` with that value.
+> Otherwise the dashboard will show 0 for all metrics on that service.
 
 ### Run
 
@@ -330,7 +357,7 @@ Each line: timestamp, service, reason, agents, CPU, RAM, GPU, VRAM, error count.
 
 ```bash
 sudo journalctl -u ai_dashboard -f          # live logs
-curl http://<ip>:****/metrics | head -5   # test service reachable
+curl http://<ip>:****/metrics | head -5     # test service reachable
 ```
 
 ---
