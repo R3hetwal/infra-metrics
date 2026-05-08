@@ -1,6 +1,6 @@
 """
 infra_metrics/config.py
-Service config — reads services.yaml, exposes device_index for GPU tracking.
+Service config — reads services.yaml, exposes gpu_device_index for GPU tracking.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ class ServiceConfig:
     service: str = ""
     host: str = "localhost"
     port: int = 0
-    device_index: Optional[int] = None   # GPU device index; None → no GPU tracking
+    gpu_device_index: Optional[int] = None   # GPU device index; None → no GPU tracking
 
 
 def load_config(path: str = "monitoring/services.yaml") -> "ServiceConfig":
@@ -38,7 +38,7 @@ def load_config(path: str = "monitoring/services.yaml") -> "ServiceConfig":
                     service=svc["name"],
                     host=svc.get("host", "localhost"),
                     port=svc.get("port", 0),
-                    device_index=svc.get("device_index", None),
+                    gpu_device_index=svc.get("device_index", None),  # yaml key stays device_index
                 )
                 return _config
     except Exception:

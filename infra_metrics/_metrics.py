@@ -2,6 +2,10 @@
 infra_metrics/_metrics.py
 Centralised Prometheus metric definitions.
 All metrics defined once; re-import safe (catches duplicate-registration ValueError).
+
+NOTE: cpu_usage_percent / ram_usage_mb gauges live in _system.py (they carry
+      per-endpoint labels and are also written there). Do NOT define them here
+      to avoid double-registration crashes on import.
 """
 
 from prometheus_client import Counter, Gauge, Histogram, REGISTRY
@@ -34,16 +38,15 @@ _SE = ["service", "endpoint"]
 
 ACTIVE_AGENTS       = _g("active_agents_total",              "Currently active agents/requests",     _SE)
 PEAK_ACTIVE_AGENTS  = _g("peak_active_agents_total",         "Peak concurrent agents ever seen",      _SE)
-REQUEST_COUNT       = _c("service_requests_total",           "Total requests handled",                _SE)
-ERROR_COUNT         = _c("service_errors_total",             "Total errors raised",                   _SE)
+
+# 3-label counters — status ("ok"/"error") and exception_type match decorator.py usage
+REQUEST_COUNT       = _c("service_requests_total",           "Total requests handled",                _SE + ["status"])
+ERROR_COUNT         = _c("service_errors_total",             "Total errors raised",                   _SE + ["exception_type"])
+
 REQUEST_LATENCY     = _h(
     "service_request_latency_seconds", "Request latency in seconds", _SE,
     buckets=[.005, .01, .025, .05, .1, .25, .5, 1.0, 2.5, 5.0, 10.0],
 )
-
-# ── Per-service system resources ────────────────────────────────────────────
-CPU_USAGE  = _g("cpu_usage_percent_service", "Process CPU usage percent",   ["service"])
-RAM_USAGE  = _g("ram_usage_mb_service",      "Process RSS memory in MB",    ["service"])
 
 # ── GPU metrics ─────────────────────────────────────────────────────────────
 # Background-polled (true utilisation, not just before/after snapshot)
