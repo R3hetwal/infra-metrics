@@ -190,7 +190,8 @@ async def your_stream_endpoint(request: Request, ...):
     cfg = get_config()
     svc = cfg.service
     ep  = "your_stream_endpoint"
-    dev = cfg.device_index          # None → no GPU tracking
+    dev = cfg.gpu_device_index
+        # None → no GPU tracking
 
     async def generator():
         ACTIVE_AGENTS.labels(service=svc, endpoint=ep).inc()

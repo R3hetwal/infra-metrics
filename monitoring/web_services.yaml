@@ -3,7 +3,8 @@
 # Service registry for infra-metrics dashboard and @track() decorator.
 #
 # Fields:
-#   name          — must match SERVICE_NAME env var set when starting each service
+#   name          — must match INFRA_METRICS_SERVICE env var (or SERVICE_NAME fallback)
+#                   set in your systemd unit or shell before starting each service
 #   host          — hostname where the service runs
 #   port          — port the service listens on  ← set your own, not shown here
 #   device_index  — (optional) NVML GPU device index
