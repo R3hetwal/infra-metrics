@@ -1,14 +1,39 @@
-scrape_interval: 5s
+# monitoring/services.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Service registry for infra-metrics dashboard and @track() decorator.
+#
+# Fields:
+#   name          — must match SERVICE_NAME env var set when starting each service
+#   host          — hostname where the service runs
+#   port          — port the service listens on  ← set your own, not shown here
+#   device_index  — (optional) NVML GPU device index
+#                   omit or set null for CPU-only services
+#
+# After editing, restart web_dashboard.py to pick up changes.
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
-  - name: speech_to_text
-    host: localhost    # ← IP only, no http://
-    port: ****
+  - name: stt
+    host: localhost
+    port: ****         # ← replace with your actual port
+    device_index: null
+
+  - name: xtts
+    host: localhost
+    port: ****         # ← replace with your actual port
+    device_index: 1  # 4060 Ti (adjust if your GPU index differs)
 
   - name: ner
-     host: localhost    
-     port: ****
+    host: localhost
+    port: ****         # ← replace with your actual port
+    device_index: null
 
-  - name: sentiment_analysis
-     host: localhost    
-     port: ****
+  - name: sentiment
+    host: localhost
+    port: ****         # ← replace with your actual port
+    device_index: null
 
+  - name: asterisk_ai
+    host: localhost
+    port: ****         # ← replace with your actual port
+    device_index: null

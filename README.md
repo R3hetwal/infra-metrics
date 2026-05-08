@@ -170,6 +170,69 @@ configure(
 
 ---
 
+
+## Streaming Endpoints
+
+`@track()` wraps the **construction** of the endpoint function, not the lifetime of
+a streaming response. For `StreamingResponse` / async-generator endpoints the
+response object is returned immediately — the generator body runs later, after
+`@track()` has already decremented the agent counter and snapshotted GPU.
+
+Use the **manual pattern** (already in use for xtts) for any streaming endpoint:
+
+```python
+from infra_metrics import gpu_before, gpu_after
+from infra_metrics._metrics import ACTIVE_AGENTS, PEAK_ACTIVE_AGENTS
+from infra_metrics.config import get_config
+
+@app.post("/your_stream_endpoint")
+async def your_stream_endpoint(request: Request, ...):
+    cfg = get_config()
+    svc = cfg.service
+    ep  = "your_stream_endpoint"
+    dev = cfg.device_index          # None → no GPU tracking
+
+    async def generator():
+        ACTIVE_AGENTS.labels(service=svc, endpoint=ep).inc()
+        before = gpu_before(svc, ep, dev) if dev is not None else None
+        try:
+            async for chunk in your_data_source(...):
+                yield chunk
+        except GeneratorExit:
+            raise
+        finally:
+            ACTIVE_AGENTS.labels(service=svc, endpoint=ep).dec()
+            if dev is not None:
+                gpu_after(svc, ep, before_mem_mb=before, device_index=dev)
+
+    return StreamingResponse(generator(), media_type="...")
+```
+
+### Why not @track() for streams?
+
+| | `@track()` | Manual |
+|---|---|---|
+| Non-streaming endpoints | ✓ perfect | verbose |
+| Streaming endpoints | ✗ agent dec too early | ✓ correct |
+
+### services.yaml for GPU-enabled services
+
+```yaml
+services:
+  - name: xtts
+    host: localhost
+    port: 0       # set your port
+    device_index: 1    # GPU index from nvidia-smi
+  - name: stt
+    host: localhost
+    port: 0
+    device_index: null # CPU-only → no GPU tracking
+```
+
+The background GPU polling thread (util % + power watts every 2 s) starts
+automatically via `mount_metrics(app)` if `device_index` is set.
+
+
 ## Monitoring stack (Prometheus + Grafana, no Docker)
 
 Everything in `monitoring/` folder. Clone the repo on your monitoring server.

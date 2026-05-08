@@ -1,152 +1,171 @@
 """
-GPU metrics via NVML.
+infra_metrics/_gpu.py
 
-- Safe to import on CPU-only machines (NVML_AVAILABLE = False → all calls are no-ops)
-- Merges gpu_metrics.py + gpu_profiler.py into one coherent module
-- Exposes both a functional API (gpu_before / gpu_after) and a context-manager (GPUProfiler)
+GPU helpers built on pynvml.
+  - gpu_before() / gpu_after()  — per-request VRAM + util snapshots
+  - start_gpu_background()      — background thread: true GPU util % + power watts
+                                  polled every 2 s, exposed as per-service metrics
+
+All functions are safe to call when pynvml is unavailable or when
+device_index is None — they simply become no-ops / return None.
 """
 
 from __future__ import annotations
 
-import logging
-from contextlib import contextmanager
-from typing import Generator
-
-from prometheus_client import Gauge
-
-logger = logging.getLogger(__name__)
-
-# ── NVML init (safe) ─────────────────────────────────────────────────────────
+import threading
+import time
+from typing import Optional
 
 try:
-    import pynvml  # optional dependency
+    import pynvml
 
     pynvml.nvmlInit()
-    NVML_AVAILABLE = True
-except Exception:  # ImportError OR NVMLError
-    NVML_AVAILABLE = False
-    logger.debug("pynvml not available – GPU metrics disabled")
+    _NVML_OK = True
+except Exception:
+    _NVML_OK = False
 
-# ── Prometheus gauges ─────────────────────────────────────────────────────────
-
-_LABEL_NAMES = ["service", "endpoint", "stage"]
-
-GPU_UTIL = Gauge(
-    "gpu_utilization_percent",
-    "GPU utilisation (%)",
-    _LABEL_NAMES,
-)
-GPU_MEM = Gauge(
-    "gpu_memory_used_mb",
-    "GPU memory used (MB)",
-    _LABEL_NAMES,
-)
-GPU_MEM_DELTA = Gauge(
-    "gpu_memory_delta_mb",
-    "GPU VRAM delta for a single request (MB)",
-    ["service", "endpoint"],
-)
-GPU_POWER_WATTS = Gauge(
-    "gpu_power_watts",
-    "GPU power draw (W) via NVML — 0 if unsupported",
-    ["service"],
+from infra_metrics._metrics import (
+    GPU_MEM_DELTA,
+    GPU_MEM_USED,
+    GPU_POWER,
+    GPU_UTIL,
+    GPU_UTIL_TRUE,
 )
 
-# ── Internal snapshot ─────────────────────────────────────────────────────────
+# ── Internal state ──────────────────────────────────────────────────────────
+_bg_threads: dict[tuple, threading.Thread] = {}
+_bg_stop: dict[tuple, threading.Event] = {}
 
 
-def _snapshot(device_index: int) -> tuple[float, float, float]:
-    """Return (utilisation_pct, vram_used_mb, power_watts) or (0, 0, 0) if NVML unavailable."""
-    if not NVML_AVAILABLE:
-        return 0.0, 0.0, 0.0
+# ── Low-level nvml helpers ──────────────────────────────────────────────────
+
+def _handle(device_index: int):
+    if not _NVML_OK:
+        return None
     try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device_index)
-        util = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
-        mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        try:
-            power_w = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # mW → W
-        except Exception:
-            power_w = 0.0
-        return float(util), mem_info.used / 1024 / 1024, power_w
-    except Exception as exc:  # device disappeared, driver error, etc.
-        logger.warning("GPU snapshot failed: %s", exc)
-        return 0.0, 0.0, 0.0
+        return pynvml.nvmlDeviceGetHandleByIndex(device_index)
+    except Exception:
+        return None
 
 
-def _record(service: str, endpoint: str, stage: str, device_index: int) -> float:
-    """Snapshot + push to Prometheus. Returns vram_mb for delta arithmetic."""
-    util, mem, power_w = _snapshot(device_index)
-    GPU_UTIL.labels(service, endpoint, stage).set(util)
-    GPU_MEM.labels(service, endpoint, stage).set(mem)
-    # Record power at every "after" snapshot (one reading per completed request)
-    if stage == "after" and power_w > 0:
-        GPU_POWER_WATTS.labels(service).set(power_w)
+def _read_mem_mb(device_index: int) -> Optional[float]:
+    h = _handle(device_index)
+    if h is None:
+        return None
+    try:
+        info = pynvml.nvmlDeviceGetMemoryInfo(h)
+        return info.used / 1024 / 1024
+    except Exception:
+        return None
+
+
+def _read_util_pct(device_index: int) -> Optional[float]:
+    h = _handle(device_index)
+    if h is None:
+        return None
+    try:
+        rates = pynvml.nvmlDeviceGetUtilizationRates(h)
+        return float(rates.gpu)
+    except Exception:
+        return None
+
+
+def _read_power_w(device_index: int) -> Optional[float]:
+    h = _handle(device_index)
+    if h is None:
+        return None
+    try:
+        return pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0  # mW → W
+    except Exception:
+        return None
+
+
+# ── Background polling thread ───────────────────────────────────────────────
+
+def _bg_poll(service: str, device_index: int, stop: threading.Event) -> None:
+    """
+    Polls GPU every 2 s and updates:
+      true_gpu_utilization_percent{service=X}
+      gpu_power_watts{service=X}
+
+    These give the dashboard a continuous read of true GPU load even when
+    no request is actively in-flight.
+    """
+    while not stop.wait(2.0):
+        util = _read_util_pct(device_index)
+        power = _read_power_w(device_index)
+        if util is not None:
+            GPU_UTIL_TRUE.labels(service=service).set(util)
+        if power is not None:
+            GPU_POWER.labels(service=service).set(power)
+
+
+def start_gpu_background(service: str, device_index: int) -> None:
+    """Start (or restart) the background GPU polling thread for a service."""
+    key = (service, device_index)
+    existing = _bg_threads.get(key)
+    if existing and existing.is_alive():
+        return
+    stop = threading.Event()
+    _bg_stop[key] = stop
+    t = threading.Thread(
+        target=_bg_poll,
+        args=(service, device_index, stop),
+        daemon=True,
+        name=f"gpu-bg-{service}-dev{device_index}",
+    )
+    t.start()
+    _bg_threads[key] = t
+
+
+def stop_gpu_background(service: str, device_index: int) -> None:
+    """Signal the background thread to stop (usually not needed — daemon thread)."""
+    key = (service, device_index)
+    if key in _bg_stop:
+        _bg_stop[key].set()
+
+
+# ── Per-request helpers (used by @track and manual wrapping) ─────────────────
+
+def gpu_before(
+    service: str,
+    endpoint: str,
+    device_index: int,
+) -> Optional[float]:
+    """
+    Call just before the work begins.
+    Records VRAM used + GPU util at the 'before' stage.
+    Returns current VRAM in MB (pass to gpu_after as before_mem_mb).
+    """
+    mem = _read_mem_mb(device_index)
+    util = _read_util_pct(device_index)
+    if mem is not None:
+        GPU_MEM_USED.labels(service=service, endpoint=endpoint, stage="before").set(mem)
+    if util is not None:
+        GPU_UTIL.labels(service=service, endpoint=endpoint, stage="before").set(util)
     return mem
 
 
-# ── Public functional API ─────────────────────────────────────────────────────
-
-
-def gpu_before(service: str, endpoint: str, device_index: int = 0) -> float:
-    """Record pre-request GPU state. Returns VRAM (MB) for delta calculation."""
-    return _record(service, endpoint, "before", device_index)
-
-
-def gpu_after(service: str, endpoint: str, before_mem_mb: float, device_index: int = 0) -> None:
-    """Record post-request GPU state and push VRAM delta."""
-    after_mem = _record(service, endpoint, "after", device_index)
-    GPU_MEM_DELTA.labels(service, endpoint).set(after_mem - before_mem_mb)
-
-
-# ── Context-manager / class API ───────────────────────────────────────────────
-
-
-class GPUProfiler:
+def gpu_after(
+    service: str,
+    endpoint: str,
+    before_mem_mb: Optional[float],
+    device_index: int,
+) -> None:
     """
-    Wraps a block of code with before/after GPU recording.
+    Call just after the work finishes (or in a finally block).
+    Records VRAM used + GPU util at 'after' stage, and VRAM delta.
 
-    Usage (manual):
-        profiler = GPUProfiler(service="svc", endpoint="predict")
-        profiler.start()
-        ...
-        profiler.stop()
-
-    Usage (context manager):
-        with GPUProfiler(service="svc", endpoint="predict"):
-            ...
-
-    Usage (decorator helper — prefer @track() instead):
-        @GPUProfiler.decorator(service="svc")
-        def predict(...): ...
+    Note for streaming endpoints: call this inside the generator's finally
+    block (after the last chunk), not after StreamingResponse() construction.
     """
-
-    def __init__(self, service: str, endpoint: str, device_index: int = 0) -> None:
-        self.service = service
-        self.endpoint = endpoint
-        self.device_index = device_index
-        self._before_mem: float = 0.0
-
-    def start(self) -> None:
-        self._before_mem = gpu_before(self.service, self.endpoint, self.device_index)
-
-    def stop(self) -> None:
-        gpu_after(self.service, self.endpoint, self._before_mem, self.device_index)
-
-    # context-manager support
-    def __enter__(self) -> "GPUProfiler":
-        self.start()
-        return self
-
-    def __exit__(self, *_) -> None:
-        self.stop()
-
-
-@contextmanager
-def gpu_profile(service: str, endpoint: str, device_index: int = 0) -> Generator:
-    """Functional context manager alias for GPUProfiler."""
-    p = GPUProfiler(service, endpoint, device_index)
-    p.start()
-    try:
-        yield p
-    finally:
-        p.stop()
+    mem = _read_mem_mb(device_index)
+    util = _read_util_pct(device_index)
+    if mem is not None:
+        GPU_MEM_USED.labels(service=service, endpoint=endpoint, stage="after").set(mem)
+    if util is not None:
+        GPU_UTIL.labels(service=service, endpoint=endpoint, stage="after").set(util)
+    if mem is not None and before_mem_mb is not None:
+        GPU_MEM_DELTA.labels(service=service, endpoint=endpoint).set(
+            mem - before_mem_mb
+        )

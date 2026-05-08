@@ -1,52 +1,60 @@
 """
-Central configuration for infra-metrics.
-
-Usage:
-    from infra_metrics import configure
-    configure(service="my-service", env="prod")
+infra_metrics/config.py
+Service config — reads services.yaml, exposes device_index for GPU tracking.
 """
 
-from dataclasses import dataclass, field
-from typing import Dict, Optional
+from __future__ import annotations
+
 import os
+from dataclasses import dataclass
+from typing import Optional
+
+_config: Optional["ServiceConfig"] = None
 
 
 @dataclass
-class _Config:
-    service: str = "unknown"
-    env: str = "dev"
-    extra_labels: Dict = field(default_factory=dict)
-    gpu_device_index: Optional[int] = 0
+class ServiceConfig:
+    service: str = ""
+    host: str = "localhost"
+    port: int = 0
+    device_index: Optional[int] = None   # GPU device index; None → no GPU tracking
 
 
-# Auto-populate from env vars if present
-_config = _Config(
-    service=os.getenv("INFRA_METRICS_SERVICE", "unknown"),
-    env=os.getenv("INFRA_METRICS_ENV", "dev"),
-)
-
-
-def configure(
-    service: str,
-    env: str = "dev",
-    extra_labels: Optional[Dict] = None,
-    gpu_device_index: Optional[int] = 0,
-) -> None:
+def load_config(path: str = "monitoring/services.yaml") -> "ServiceConfig":
     """
-    Call once at application startup.
-
-    Args:
-        service:          Name of this service, used as a Prometheus label.
-        env:              Deployment environment ("dev" / "prod" / etc).
-        extra_labels:     Any additional static key-value labels to attach.
-        gpu_device_index: NVML device index to monitor. Pass None to disable
-                          GPU tracking even when pynvml is installed.
+    Load config for THIS service from services.yaml.
+    Service name resolved from env var SERVICE_NAME (set it in your start script).
+    Falls back to empty ServiceConfig if file/key missing.
     """
-    _config.service = service
-    _config.env = env
-    _config.extra_labels = extra_labels or {}
-    _config.gpu_device_index = gpu_device_index
-
-
-def get_config() -> _Config:
+    global _config
+    svc_name = os.environ.get("SERVICE_NAME", "")
+    try:
+        import yaml  # optional dep
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        for svc in data.get("services", []):
+            if svc.get("name") == svc_name:
+                _config = ServiceConfig(
+                    service=svc["name"],
+                    host=svc.get("host", "localhost"),
+                    port=svc.get("port", 0),
+                    device_index=svc.get("device_index", None),
+                )
+                return _config
+    except Exception:
+        pass
+    _config = ServiceConfig(service=svc_name)
     return _config
+
+
+def get_config() -> "ServiceConfig":
+    global _config
+    if _config is None:
+        load_config()
+    return _config
+
+
+def set_config(cfg: "ServiceConfig") -> None:
+    """Override config programmatically (useful for tests or manual init)."""
+    global _config
+    _config = cfg

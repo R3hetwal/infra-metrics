@@ -10,7 +10,7 @@ infra-metrics enhanced web dashboard
 
 Usage:
     pip install fastapi uvicorn requests pyyaml
-    python3 web_dashboard.py --config services.yaml --port 9999
+    python3 web_dashboard.py --config monitoring/services.yaml --port 9999
 """
 
 import argparse
@@ -26,22 +26,25 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# ── Config ───────────────────────────────────────────────────────────────────
+# Ports intentionally omitted — set them in services.yaml, not here.
 DEFAULT_SERVICES = [
-    {"name": "stt",              "host": "localhost", "port": ****},
-    {"name": "xtts",             "host": "localhost", "port": ****},
-    {"name": "ner",              "host": "localhost", "port": ****},
-    {"name": "sentiment",        "host": "localhost", "port": ****},
-    {"name": "asterisk_ai",      "host": "localhost", "port": ****},
+    {"name": "stt",          "host": "localhost", "port": 0},
+    {"name": "xtts",         "host": "localhost", "port": 0},
+    {"name": "ner",          "host": "localhost", "port": 0},
+    {"name": "sentiment",    "host": "localhost", "port": 0},
+    {"name": "asterisk_ai",  "host": "localhost", "port": 0},
 ]
 
-SERVICES      = list(DEFAULT_SERVICES)
-HISTORY_LEN   = 60    # 60 pts x 5 s = 5 min of history
-history       = defaultdict(lambda: defaultdict(lambda: deque(maxlen=HISTORY_LEN)))
-crash_log     = []
-last_up       = {}
-last_errors   = {}
-CRASH_DIR     = Path("crash_logs")
+SERVICES        = list(DEFAULT_SERVICES)
+HISTORY_LEN     = 60       # 60 pts × 5 s = 5 min of history
+history         = defaultdict(lambda: defaultdict(lambda: deque(maxlen=HISTORY_LEN)))
+crash_log       = []
+last_up         = {}
+last_errors     = {}
+failure_counts  = {}       # consecutive scrape failures per service
+CRASH_THRESHOLD = 3        # N consecutive failures (~12 s) before declaring a crash
+CRASH_DIR       = Path("crash_logs")
 CRASH_DIR.mkdir(exist_ok=True)
 
 
@@ -54,7 +57,7 @@ def load_services(path: str) -> list:
         return DEFAULT_SERVICES
 
 
-# ── Prometheus parser ──────────────────────────────────────────────────────────
+# ── Prometheus parser ─────────────────────────────────────────────────────────
 def parse_metrics(text: str) -> dict:
     result = {}
     for line in text.splitlines():
@@ -77,15 +80,19 @@ def sum_val(m, metric, **f):
             t += val; found = True
     return t if found else None
 
-
 def get_val(m, metric, **f):
     for labels, val in m.get(metric, []):
         if all(labels.get(k) == v for k, v in f.items()):
             return val
     return None
 
+def max_val(m, metric, **f):
+    vals = [val for labels, val in m.get(metric, [])
+            if all(labels.get(k) == v for k, v in f.items())]
+    return max(vals) if vals else None
 
-# ── Scraper ────────────────────────────────────────────────────────────────────
+
+# ── Scraper ───────────────────────────────────────────────────────────────────
 def scrape(svc: dict):
     url = f"http://{svc['host']}:{svc['port']}/metrics"
     try:
@@ -96,7 +103,7 @@ def scrape(svc: dict):
         return None, str(e)
 
 
-# ── Crash logger ───────────────────────────────────────────────────────────────
+# ── Crash logger ──────────────────────────────────────────────────────────────
 def load_crash_history():
     """Load existing crash logs into memory on startup."""
     entries = []
@@ -123,58 +130,74 @@ def log_crash(name: str, reason: str, snap: dict):
         f.write(json.dumps(entry) + "\n")
 
 
-# ── Collector ──────────────────────────────────────────────────────────────────
+# ── Collector ─────────────────────────────────────────────────────────────────
 def collect_all() -> list:
     results = []
     ts = datetime.now().isoformat(timespec="seconds")
 
     for svc in SERVICES:
-        name = svc["name"]
+        name  = svc["name"]
         label = svc.get("metrics_label", name)
         m, err = scrape(svc)
         is_up  = m is not None
 
         def sv(metric, **kw): return sum_val(m or {}, metric, **kw) or 0
         def gv(metric, **kw): return get_val(m or {}, metric, **kw) or 0
+        def mv(metric, **kw): return max_val(m or {}, metric, **kw) or 0
 
         lat_s = sv("service_request_latency_seconds_sum",   service=label)
         lat_c = sv("service_request_latency_seconds_count", service=label) or 1
 
         snap = {
             "agents":      int(sv("active_agents_total",              service=label)),
+            "peak_agents": int(sv("peak_active_agents_total",         service=label)),
             "requests":    int(sv("service_requests_total",           service=label)),
             "errors":      int(sv("service_errors_total",             service=label)),
             "latency_ms":  round((lat_s / lat_c) * 1000, 1),
             "cpu":         round(sv("cpu_usage_percent_service",      service=label), 1),
             "ram_mb":      round(sv("ram_usage_mb_service",           service=label), 0),
-            "gpu_util":    round(gv("gpu_utilization_percent",        service=label, stage="after"), 1),
-            "vram_mb":     round(gv("gpu_memory_used_mb",             service=label, stage="after"), 0),
+            "gpu_util":    round(mv("true_gpu_utilization_percent",   service=label)
+                                 or mv("gpu_utilization_percent", service=label, stage="after"), 1),
+            "vram_mb":     round(mv("gpu_memory_used_mb",             service=label, stage="after"), 0),
             "vram_delta":  round(sv("gpu_memory_delta_mb",            service=label), 1),
-            "gpu_power_w": round(gv("gpu_power_watts",                service=label), 1),
+            "gpu_power_w": round(mv("gpu_power_watts",                service=label), 1),
         }
 
+        # ── Crash detection with debounce ─────────────────────────────────
         was_up = last_up.get(name, True)
-        if was_up and not is_up:
-            log_crash(name, err or "unreachable", snap)
-        last_up[name] = is_up
 
-        if is_up:
+        if not is_up:
+            failure_counts[name] = failure_counts.get(name, 0) + 1
+            # Only declare a crash after CRASH_THRESHOLD consecutive failures
+            if was_up and failure_counts[name] >= CRASH_THRESHOLD:
+                log_crash(name, err or "unreachable", snap)
+                last_up[name] = False
+        else:
+            if not was_up:
+                # Service recovered — reset counter silently
+                failure_counts[name] = 0
+            last_up[name] = True
+
             prev_err = last_errors.get(name, 0)
             if snap["errors"] > prev_err:
-                log_crash(name, f"error spike -> {snap['errors']} total errors", snap)
+                log_crash(name, f"error spike → {snap['errors']} total errors", snap)
             last_errors[name] = snap["errors"]
+
             h = history[name]
             h["ts"].append(ts)
             for k, v in snap.items():
                 h[k].append(v)
 
-        results.append({"name": name, "port": svc["port"], "up": is_up,
-                         "error": err, **snap,
-                         "history": {k: list(v) for k, v in history[name].items()}})
+        results.append({
+            "name": name, "port": svc["port"],
+            "up": last_up.get(name, is_up),
+            "error": err, **snap,
+            "history": {k: list(v) for k, v in history[name].items()},
+        })
     return results
 
 
-# ── FastAPI ────────────────────────────────────────────────────────────────────
+# ── FastAPI ───────────────────────────────────────────────────────────────────
 app = FastAPI(docs_url=None, redoc_url=None)
 
 @app.get("/api/metrics")
@@ -187,7 +210,7 @@ def api_metrics():
 def index(): return HTML
 
 
-# ── Frontend ───────────────────────────────────────────────────────────────────
+# ── Frontend ──────────────────────────────────────────────────────────────────
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -211,7 +234,7 @@ header{display:flex;align-items:center;gap:16px;padding:16px 28px;border-bottom:
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
 #hclock{margin-left:auto;color:var(--mu);font-size:12px}
 .prog{height:2px;background:var(--cy);position:absolute;bottom:0;left:0;right:0;
-  transform-origin:left;animation:prog 5s linear infinite}
+  transform-origin:left;animation:prog 4s linear infinite}
 @keyframes prog{from{transform:scaleX(1)}to{transform:scaleX(0)}}
 nav{display:flex;background:var(--sf);border-bottom:1px solid var(--bd)}
 nav button{background:none;border:none;border-bottom:2px solid transparent;color:var(--mu);
@@ -250,7 +273,7 @@ main{padding:24px 28px}
 .mf{height:100%;border-radius:2px;transition:width .5s}
 .dn-body{padding:16px;color:var(--rd);font-size:12px}
 
-/* ── Shared AM card style (used by Charts tab + Usage AM mode) ── */
+/* Shared AM card style */
 .am-card{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:10px}
 .am-header{display:flex;align-items:center;gap:0;border-bottom:1px solid var(--bd);padding-bottom:10px;flex-wrap:wrap;row-gap:6px}
 .am-title{font-family:'Syne',sans-serif;font-size:13px;font-weight:800;color:#fff}
@@ -270,11 +293,10 @@ main{padding:24px 28px}
 .csn:hover:not(.on){color:var(--tx)}
 .cpane{display:none}.cpane.on{display:block}
 
-/* Charts tab: 2-column grid of AM cards, taller charts */
 .charts-am-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .charts-am-grid .am-chart-wrap{height:240px}
 
-/* ── Usage Tab ─────────────────────────────────────────────────── */
+/* Usage Tab */
 .usage-toolbar{
   display:flex;align-items:center;gap:12px;margin-bottom:20px;
   background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:10px 16px;
@@ -290,7 +312,6 @@ main{padding:24px 28px}
 .ctb.on{background:rgba(86,212,221,.12);border-color:var(--cy);color:var(--cy)}
 .ctb:hover:not(.on){color:var(--tx);border-color:var(--tx)}
 
-/* Usage radar: 2-col grid */
 .usage-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .usage-card{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px}
 .usage-card-header{display:flex;align-items:baseline;justify-content:space-between}
@@ -301,7 +322,6 @@ main{padding:24px 28px}
 .ul-item{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--mu)}
 .ul-swatch{width:8px;height:8px;border-radius:2px;flex-shrink:0}
 
-/* Usage AM: same 2-col AM grid */
 .usage-am-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .usage-am-grid .am-chart-wrap{height:200px}
 
@@ -338,7 +358,6 @@ tr:hover td{background:var(--sf2)}
 </nav>
 <main>
 
-<!-- OVERVIEW -->
 <div id="pane-overview" class="pane on">
   <div id="sum">
     <div class="ss"><div class="sl">Services</div><div class="sv" id="s-tot">—</div></div>
@@ -351,7 +370,6 @@ tr:hover td{background:var(--sf2)}
   <div id="cards"></div>
 </div>
 
-<!-- CHARTS — Activity Monitor style, 4 sub-pages -->
 <div id="pane-charts" class="pane">
   <div class="chart-subnav">
     <button class="csn on" onclick="chartPage('agents-gpu',this)">Agents &amp; GPU</button>
@@ -423,7 +441,6 @@ tr:hover td{background:var(--sf2)}
     </div>
   </div>
 
-  <!-- FIX Bug 2: GPU Power sub-page — fc-gpu_power canvas lives here -->
   <div id="cpane-gpu-power" class="cpane">
     <div class="charts-am-grid">
       <div class="am-card">
@@ -438,7 +455,6 @@ tr:hover td{background:var(--sf2)}
   </div>
 </div>
 
-<!-- USAGE — radar or activity-monitor line, 2 options only -->
 <div id="pane-usage" class="pane">
   <div class="usage-toolbar">
     <label>Chart type</label>
@@ -454,7 +470,6 @@ tr:hover td{background:var(--sf2)}
     </select>
   </div>
 
-  <!-- Radar grid (2-col, 3 rows for 5 cards) -->
   <div id="usage-radar-grid" class="usage-grid">
     <div class="usage-card">
       <div class="usage-card-header">
@@ -488,7 +503,6 @@ tr:hover td{background:var(--sf2)}
       <div class="usage-canvas-wrap"><canvas id="uc-vram"></canvas></div>
       <div class="usage-legend" id="leg-vram"></div>
     </div>
-    <!-- FIX Bug 3a: GPU Power radar card -->
     <div class="usage-card">
       <div class="usage-card-header">
         <span class="usage-card-title">GPU Power</span>
@@ -499,7 +513,6 @@ tr:hover td{background:var(--sf2)}
     </div>
   </div>
 
-  <!-- Activity Monitor line grid (2-col) -->
   <div id="usage-am-grid" class="usage-am-grid" style="display:none">
     <div class="am-card">
       <div class="am-header">
@@ -525,7 +538,6 @@ tr:hover td{background:var(--sf2)}
       </div>
       <div class="am-chart-wrap"><canvas id="am-gpu"></canvas></div>
     </div>
-    <!-- FIX Bug 1: restored am-vram canvas (was accidentally commented out) -->
     <div class="am-card">
       <div class="am-header">
         <span class="am-title">VRAM Used</span>
@@ -534,7 +546,6 @@ tr:hover td{background:var(--sf2)}
       </div>
       <div class="am-chart-wrap"><canvas id="am-vram"></canvas></div>
     </div>
-    <!-- FIX Bug 3b: GPU Power AM card with its own unique canvas id -->
     <div class="am-card">
       <div class="am-header">
         <span class="am-title">GPU Power</span>
@@ -546,7 +557,6 @@ tr:hover td{background:var(--sf2)}
   </div>
 </div>
 
-<!-- CRASHES -->
 <div id="pane-crashes" class="pane">
   <div id="crash-wrap">
     <div class="cx-head">
@@ -566,26 +576,22 @@ tr:hover td{background:var(--sf2)}
 </main>
 
 <script>
-// ── Globals ────────────────────────────────────────────────────────────────────
+// ── Globals ──────────────────────────────────────────────────────────────────
 let lastData = null;
 const COLORS = ['#00d4d4','#3d9be9','#2ea84a','#d4a017','#e63946','#9d6fe8','#e07c2a'];
 
-// Charts tab
 let fullCharts = {};
 const fcYMax   = {};
 
-// Usage tab state
 let currentChartType = 'radar';
 let currentNormalize = 'raw';
 let lastUsageSvcs    = null;
-// Radar chart instances
 let usageCharts = {};
 let usageYMax   = {};
-// AM line chart instances
 let amCharts = {};
 const amYMax = {};
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 const mb = v => v >= 1024 ? (v/1024).toFixed(1)+' GB' : Math.round(v)+' MB';
 const vc = (v,w,c) => v>=c?'cr':v>=w?'wn':'';
 function mbar(pct){
@@ -598,7 +604,7 @@ function amFmt(val, unit){
   return val + unit;
 }
 
-// ── Tab switching ──────────────────────────────────────────────────────────────
+// ── Tab switching ─────────────────────────────────────────────────────────────
 function tab(id, btn){
   document.querySelectorAll('.pane').forEach(p => p.classList.remove('on'));
   document.querySelectorAll('nav button').forEach(b => b.classList.remove('on'));
@@ -608,7 +614,7 @@ function tab(id, btn){
   if(id==='usage'  && lastData) renderUsageTab(lastData.services.filter(s=>s.up));
 }
 
-// ── Overview cards ─────────────────────────────────────────────────────────────
+// ── Overview cards ────────────────────────────────────────────────────────────
 function renderCard(s){
   const ac = !s.up?'dn':s.errors>0?'wn':'up';
   const badge = !s.up
@@ -619,7 +625,7 @@ function renderCard(s){
     body='<div class="dn-body">&#10005; '+(s.error||'unreachable')+'</div>';
   } else {
     body='<div class="cm">'
-      +'<div class="mt"><span class="ml">Agents</span><span class="mv '+vc(s.agents,10,30)+'">'+s.agents+'</span></div>'
+      +'<div class="mt"><span class="ml">Agents (Peak)</span><span class="mv '+vc(s.agents,10,30)+'">'+s.agents+' <span style="font-size:10px; color:var(--mu);">('+s.peak_agents+')</span></span></div>'
       +'<div class="mt"><span class="ml">Requests</span><span class="mv">'+s.requests.toLocaleString()+'</span></div>'
       +'<div class="mt"><span class="ml">Latency</span><span class="mv '+vc(s.latency_ms,300,1000)+'">'+s.latency_ms+'ms</span></div>'
       +'<div class="mt"><span class="ml">CPU</span><span class="mv '+vc(s.cpu,60,85)+'">'+s.cpu+'%</span>'+mbar(s.cpu)+'</div>'
@@ -635,10 +641,6 @@ function renderCard(s){
     +body+'</div>';
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// CHARTS TAB — Activity Monitor style, identical engine to Usage AM mode
-// ══════════════════════════════════════════════════════════════════════════════
-
 const FC_DEFS = [
   {canvasId:'fc-agents',    legId:'fc-leg-agents',    curId:'fc-cur-agents',    key:'agents',      unit:' agents',floor:10, fixedMax:null},
   {canvasId:'fc-gpu_util',  legId:'fc-leg-gpu_util',  curId:'fc-cur-gpu_util',  key:'gpu_util',    unit:'%',      floor:100,fixedMax:100 },
@@ -647,11 +649,9 @@ const FC_DEFS = [
   {canvasId:'fc-cpu',       legId:'fc-leg-cpu',       curId:'fc-cur-cpu',       key:'cpu',         unit:'%',      floor:100,fixedMax:100 },
   {canvasId:'fc-ram_mb',    legId:'fc-leg-ram_mb',    curId:'fc-cur-ram_mb',    key:'ram_mb',      unit:' MB',    floor:512,fixedMax:null},
   {canvasId:'fc-gpu_power', legId:'fc-leg-gpu_power', curId:'fc-cur-gpu_power', key:'gpu_power_w', unit:' W',     floor:50, fixedMax:null},
-  ];
+];
 
-function fcPad(arr){
-  const a=[...arr]; while(a.length<60) a.unshift(null); return a.slice(-60);
-}
+function fcPad(arr){ const a=[...arr]; while(a.length<60) a.unshift(null); return a.slice(-60); }
 function fcCeil(key, floor, datasets){
   const allVals=datasets.flatMap(d=>d.data).filter(v=>v!=null&&!isNaN(v));
   const dataMax=allVals.length?Math.max(...allVals):0;
@@ -707,7 +707,6 @@ function renderFullCharts(svcs){
         }
       });
     }
-    // Legend + peak
     const legEl=document.getElementById(legId);
     const curEl=document.getElementById(curId);
     if(legEl) legEl.innerHTML=upSvcs.map((s,i)=>
@@ -729,17 +728,13 @@ function chartPage(id, btn){
   if(lastData) renderFullCharts(lastData.services);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// USAGE TAB — Radar mode
-// ══════════════════════════════════════════════════════════════════════════════
-
 const USAGE_DEFS=[
   {id:'uc-cpu',       key:'cpu',         unit:'%',  peakId:'peak-cpu',       legId:'leg-cpu'},
   {id:'uc-ram',       key:'ram_mb',      unit:'MB', peakId:'peak-ram',       legId:'leg-ram'},
   {id:'uc-gpu',       key:'gpu_util',    unit:'%',  peakId:'peak-gpu',       legId:'leg-gpu'},
   {id:'uc-vram',      key:'vram_mb',     unit:'MB', peakId:'peak-vram',      legId:'leg-vram'},
   {id:'uc-gpu_power', key:'gpu_power_w', unit:'W',  peakId:'peak-gpu_power', legId:'leg-gpu_power'},
-  ];
+];
 
 function usageCeil(key, vals){
   const floors={cpu:100,gpu_util:100,ram_mb:512,vram_mb:512};
@@ -811,11 +806,6 @@ function renderUsageRadar(svcs){
   });
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// USAGE TAB — Activity Monitor line mode
-// ══════════════════════════════════════════════════════════════════════════════
-
-// FIX Bug 3c: added gpu_power_w entry; canvas id am-gpu_power is unique
 const AM_USAGE_DEFS=[
   {canvasId:'am-cpu',       legId:'am-leg-cpu',       curId:'am-cur-cpu',       key:'cpu',         unit:'%',  floor:100,fixedMax:100 },
   {canvasId:'am-ram',       legId:'am-leg-ram',       curId:'am-cur-ram',       key:'ram_mb',      unit:' MB',floor:512,fixedMax:null},
@@ -877,7 +867,6 @@ function renderUsageAM(svcs){
         }
       });
     }
-    // Legend + peak
     const legEl=document.getElementById(legId);
     const curEl=document.getElementById(curId);
     if(legEl) legEl.innerHTML=svcs.map((s,i)=>
@@ -891,7 +880,6 @@ function renderUsageAM(svcs){
   });
 }
 
-// ── Usage tab dispatcher ──────────────────────────────────────────────────────
 function renderUsageTab(svcs){
   lastUsageSvcs=svcs;
   if(!svcs||!svcs.length) return;
@@ -903,7 +891,6 @@ function setChartType(type, btn){
   currentChartType=type;
   document.querySelectorAll('.ctb').forEach(b=>b.classList.remove('on'));
   btn.classList.add('on');
-  // Swap visible grids
   document.getElementById('usage-radar-grid').style.display=type==='radar'?'':'none';
   document.getElementById('usage-am-grid').style.display=type==='line'?'':'none';
   if(lastUsageSvcs) renderUsageTab(lastUsageSvcs);
@@ -911,13 +898,11 @@ function setChartType(type, btn){
 
 function setNormalize(val){
   currentNormalize=val;
-  // Destroy + rebuild radar charts with new scale
   Object.values(usageCharts).forEach(ch=>ch.destroy());
   usageCharts={}; usageYMax={};
   if(lastUsageSvcs) renderUsageTab(lastUsageSvcs);
 }
 
-// ── Crash log ──────────────────────────────────────────────────────────────────
 function renderCrashes(crashes){
   const empty=document.getElementById('cx-empty');
   const table=document.getElementById('cx-table');
@@ -941,7 +926,6 @@ function renderCrashes(crashes){
     +'</tr>').join('');
 }
 
-// ── Main refresh loop ──────────────────────────────────────────────────────────
 async function refresh(){
   try{
     const res=await fetch('/api/metrics');
@@ -961,14 +945,14 @@ async function refresh(){
   } catch(e){ console.error(e); }
 }
 
-setInterval(()=>{ document.getElementById('hclock').textContent=new Date().toLocaleTimeString(); },1000);
+setInterval(()=>{ document.getElementById('hclock').textContent=new Date().toLocaleTimeString(); },4000);
 refresh();
-setInterval(refresh,5000);
+setInterval(refresh,4000);
 </script>
 </body>
 </html>"""
 
-# ── Entry ──────────────────────────────────────────────────────────────────────
+# ── Entry ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port",   default=9999, type=int)
@@ -981,10 +965,10 @@ if __name__ == "__main__":
         SERVICES.extend(load_services(args.config))
         print(f"Loaded {len(SERVICES)} services from {args.config}")
     else:
-        print("Config not found — using defaults")
+        print("Config not found — using defaults (ports will be 0, set them in services.yaml)")
 
     load_crash_history()
     print(f"Loaded {len(crash_log)} crash entries from history")
-    print(f"\nDashboard  -> http://localhost:{args.port}")
-    print(f"Crash logs -> {CRASH_DIR.resolve()}/crashes_YYYY-MM-DD.jsonl\n")
+    print(f"\nDashboard  → http://localhost:{args.port}")
+    print(f"Crash logs → {CRASH_DIR.resolve()}/crashes_YYYY-MM-DD.jsonl\n")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
