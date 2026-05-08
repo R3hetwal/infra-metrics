@@ -117,3 +117,29 @@ def record_service_baseline(service: str) -> None:
     watts = _read_cpu_power_watts()
     if watts is not None:
         CPU_POWER_WATTS.labels(service).set(watts)
+
+# ── Background system poller ──────────────────────────────────────────────────
+import threading as _threading
+
+_sys_bg_threads: dict = {}
+_sys_bg_stop:    dict = {}
+
+
+def start_system_background(service: str, interval: float = 5.0) -> None:
+    """
+    Poll CPU/RAM/RAPL every `interval` seconds, updating service-level gauges.
+    Ensures idle services always show real values in the dashboard.
+    Safe to call multiple times — only one thread per service.
+    """
+    if service in _sys_bg_threads and _sys_bg_threads[service].is_alive():
+        return
+    stop = _threading.Event()
+    _sys_bg_stop[service] = stop
+
+    def _loop() -> None:
+        while not stop.wait(interval):
+            record_service_baseline(service)
+
+    t = _threading.Thread(target=_loop, daemon=True, name=f"sys-bg-{service}")
+    t.start()
+    _sys_bg_threads[service] = t

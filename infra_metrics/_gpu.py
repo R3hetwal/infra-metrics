@@ -13,7 +13,6 @@ device_index is None — they simply become no-ops / return None.
 from __future__ import annotations
 
 import threading
-import time
 from typing import Optional
 
 try:
@@ -23,6 +22,9 @@ try:
     _NVML_OK = True
 except Exception:
     _NVML_OK = False
+
+# Exported so decorator.py can gate GPU usage without importing pynvml directly
+NVML_AVAILABLE: bool = _NVML_OK
 
 from infra_metrics._metrics import (
     GPU_MEM_DELTA,
@@ -87,9 +89,6 @@ def _bg_poll(service: str, device_index: int, stop: threading.Event) -> None:
     Polls GPU every 2 s and updates:
       true_gpu_utilization_percent{service=X}
       gpu_power_watts{service=X}
-
-    These give the dashboard a continuous read of true GPU load even when
-    no request is actively in-flight.
     """
     while not stop.wait(2.0):
         util = _read_util_pct(device_index)
@@ -125,7 +124,7 @@ def stop_gpu_background(service: str, device_index: int) -> None:
         _bg_stop[key].set()
 
 
-# ── Per-request helpers (used by @track and manual wrapping) ─────────────────
+# ── Per-request helpers ──────────────────────────────────────────────────────
 
 def gpu_before(
     service: str,
@@ -133,8 +132,7 @@ def gpu_before(
     device_index: int,
 ) -> Optional[float]:
     """
-    Call just before the work begins.
-    Records VRAM used + GPU util at the 'before' stage.
+    Call just before work begins.
     Returns current VRAM in MB (pass to gpu_after as before_mem_mb).
     """
     mem = _read_mem_mb(device_index)
@@ -153,11 +151,8 @@ def gpu_after(
     device_index: int,
 ) -> None:
     """
-    Call just after the work finishes (or in a finally block).
-    Records VRAM used + GPU util at 'after' stage, and VRAM delta.
-
-    Note for streaming endpoints: call this inside the generator's finally
-    block (after the last chunk), not after StreamingResponse() construction.
+    Call just after work finishes (or in a finally block).
+    Records VRAM used + util at 'after' stage, and VRAM delta.
     """
     mem = _read_mem_mb(device_index)
     util = _read_util_pct(device_index)

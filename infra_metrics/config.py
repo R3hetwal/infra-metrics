@@ -27,7 +27,7 @@ def load_config(path: str = "monitoring/services.yaml") -> "ServiceConfig":
     Falls back to empty ServiceConfig if file/key missing.
     """
     global _config
-    svc_name = os.environ.get("SERVICE_NAME", "")
+    svc_name = os.environ.get("INFRA_METRICS_SERVICE") or os.environ.get("SERVICE_NAME", "")
     try:
         import yaml  # optional dep
         with open(path) as f:
